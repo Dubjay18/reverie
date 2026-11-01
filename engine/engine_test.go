@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/internal/embed"
 	"github.com/Dubjay18/reverie/internal/store"
 )
 
@@ -195,4 +196,129 @@ func count(t *testing.T, e *Engine, s reverie.Scope) (n int) {
 		t.Fatal(err)
 	}
 	return
+}
+
+func TestRecordRedactsSecrets(t *testing.T) {
+	ctx := context.Background()
+	e, _ := Open(t.TempDir() + "/r.db")
+	defer e.Close()
+	if err := e.Record(ctx, ev(sc, "k", reverie.Message, `{"text":"password=correcthorsebattery"}`)); err != nil {
+		t.Fatal(err)
+	}
+	var got []reverie.Event
+	e.st.For(sc).View(ctx, func(tx store.Tx) (err error) {
+		got, err = tx.Events().List(ctx, store.EventQuery{})
+		return
+	})
+	if len(got) != 1 || strings.Contains(string(got[0].Payload), "correcthorse") || !strings.Contains(string(got[0].Payload), "REDACTED") {
+		t.Fatalf("payload stored as %s", got[0].Payload)
+	}
+}
+
+// pickyEmbedder fails on any text containing "POISON", in batches and alone.
+type pickyEmbedder struct{ down bool }
+
+func (pickyEmbedder) Dimensions() int { return 4 }
+func (p pickyEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		if p.down {
+			return nil, errors.New("connection refused")
+		}
+		if strings.Contains(t, "POISON") {
+			return nil, embed.ErrRejected
+		}
+		out[i] = []float32{1, float32(len(t)), 0, 0}
+	}
+	return out, nil
+}
+
+func pendingCount(t *testing.T, e *Engine) (n int) {
+	t.Helper()
+	e.st.For(sc).View(context.Background(), func(tx store.Tx) error {
+		p, _ := tx.Index().Pending(context.Background(), 100)
+		n = len(p)
+		return nil
+	})
+	return
+}
+
+func TestOnePoisonedTextDoesNotBlockTheEmbeddingQueue(t *testing.T) {
+	ctx := context.Background()
+	e, err := Open(t.TempDir()+"/r.db", WithEmbedder(pickyEmbedder{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.stop() // drive the queue by hand
+	<-e.done
+	for _, task := range []string{"a", "b", "c"} {
+		text := "fine " + task
+		if task == "b" {
+			text = "POISON"
+		}
+		if err := e.Record(ctx, ev(sc, task, reverie.Message, `{"text":"`+text+`"}`), ev(sc, task, reverie.TaskEnded, `{"outcome":"success"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < store.MaxEmbedFailures+1; i++ {
+		if _, err := e.EmbedPending(ctx, 10); err != nil {
+			t.Fatalf("a partial failure is not an outage: %v", err)
+		}
+	}
+	// a and c are embedded; b is parked, so nothing is left pending
+	if n := pendingCount(t, e); n != 0 {
+		t.Fatalf("%d items still pending: the poisoned one is blocking or looping", n)
+	}
+	var hits []store.Hit
+	e.st.For(sc).View(ctx, func(tx store.Tx) (err error) {
+		hits, err = tx.Index().SearchVector(ctx, []float32{1, 10, 0, 0}, 10)
+		return
+	})
+	if len(hits) != 2 {
+		t.Fatalf("want a and c embedded, got %v", hits)
+	}
+}
+
+func TestEmbedderOutageIsReportedAndNothingIsParked(t *testing.T) {
+	ctx := context.Background()
+	e, _ := Open(t.TempDir()+"/r.db", WithEmbedder(pickyEmbedder{down: true}))
+	defer e.Close()
+	e.stop()
+	<-e.done
+	e.Record(ctx, ev(sc, "a", reverie.TaskEnded, `{"outcome":"success"}`))
+	for i := 0; i < store.MaxEmbedFailures+2; i++ {
+		if _, err := e.EmbedPending(ctx, 10); err == nil {
+			t.Fatal("an outage must be returned as an error")
+		}
+	}
+	if n := pendingCount(t, e); n != 1 {
+		t.Fatalf("an outage must not park items, pending=%d", n)
+	}
+}
+
+type blockingEmbedder struct{}
+
+func (blockingEmbedder) Dimensions() int { return 4 }
+func (blockingEmbedder) Embed(ctx context.Context, _ []string) ([][]float32, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestHungEmbedderDoesNotStallRecall(t *testing.T) {
+	ctx := context.Background()
+	e, _ := Open(t.TempDir()+"/r.db", WithEmbedder(blockingEmbedder{}))
+	defer e.Close()
+	e.embedTimeout = 100 * time.Millisecond
+	if err := e.Record(ctx, ev(sc, "k", reverie.Message, `{"text":"ERR_9 happened"}`), ev(sc, "k", reverie.TaskEnded, `{"outcome":"failure"}`)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	pack, err := e.Recall(ctx, sc, "ERR_9", 1000)
+	if err != nil || len(pack.Episodes) != 1 {
+		t.Fatalf("recall must degrade to full-text: %v %+v", err, pack)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("recall took %v with a hung embedder", time.Since(start))
+	}
 }

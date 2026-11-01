@@ -1,0 +1,1 @@
+{"session_id":"abc123","cwd":"/home/u/work/billing-api","hook_event_name":"PostToolUse","tool_name":"mcp__reverie__memory_recall","tool_input":{"task":"x"},"tool_response":{"content":[{"type":"text","text":"## Episodes\n- [ep:old] earlier work"}]},"tool_use_id":"toolu_03"}

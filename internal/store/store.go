@@ -40,6 +40,7 @@ type Scoped interface {
 type Tx interface {
 	Events() EventRepo
 	Episodes() EpisodeRepo
+	Index() IndexRepo
 }
 
 type EventRepo interface {
@@ -53,12 +54,15 @@ type EventRepo interface {
 type EventQuery struct {
 	TaskID string
 	After  ulid.ULID // exclusive
-	Limit  int       // 0 means DefaultLimit
+	From   ulid.ULID // inclusive lower bound
+	To     ulid.ULID // inclusive upper bound
+	Limit  int       // 0 means DefaultLimit; clamped to MaxLimit
 }
 
 const (
-	DefaultLimit = 1000
-	MaxLimit     = 10000
+	DefaultLimit     = 1000
+	MaxLimit         = 10000
+	MaxEmbedFailures = 3
 )
 
 type EpisodeRepo interface {
@@ -76,6 +80,7 @@ const (
 	Failure   Outcome = "failure"
 	Partial   Outcome = "partial"
 	Abandoned Outcome = "abandoned"
+	Unknown   Outcome = "unknown" // ended, but the source gave no verdict
 )
 
 type Tier string
@@ -90,6 +95,8 @@ const (
 type Episode struct {
 	TaskID       string
 	Title        string
+	Goal         string // first thing the user said in the task, clipped
+	LastError    string // most recent tool error, clipped
 	FirstEvent   ulid.ULID
 	LastEvent    ulid.ULID
 	StartedAt    time.Time
@@ -104,4 +111,39 @@ type Episode struct {
 	Importance   float64
 	Tier         Tier
 	Consolidated bool
+}
+
+// Item is one retrievable thing: a piece of text, optionally with a vector.
+// Kind and RefID point back at the thing it describes (an episode's task id).
+type Item struct {
+	Kind      string
+	RefID     string
+	Text      string
+	Embedding []float32 // nil until embedded; the length must match the store's pinned dimension
+}
+
+type Hit struct {
+	Kind  string
+	RefID string
+}
+
+// IndexRepo holds the derived retrieval index. It is rebuildable from the
+// typed tables and never the source of truth. Search returns ranked lists;
+// fusing them is the caller's job (internal/rank).
+type IndexRepo interface {
+	// Upsert replaces the item's text and clears its embedding and failure count.
+	Upsert(ctx context.Context, it Item) error
+	// SetEmbedding stores vec for the item whose text is still text. It
+	// reports false when the item changed or vanished since the vector was
+	// computed, so a stale vector never lands on newer text.
+	SetEmbedding(ctx context.Context, kind, refID, text string, vec []float32) (applied bool, err error)
+	// Pending lists items waiting for an embedding, skipping any that failed
+	// MaxEmbedFailures times.
+	Pending(ctx context.Context, limit int) ([]Item, error)
+	// MarkEmbedFailed counts one failed attempt against the item.
+	MarkEmbedFailed(ctx context.Context, kind, refID string) error
+	// SearchText matches any word of query (full-text, best first).
+	SearchText(ctx context.Context, query string, limit int) ([]Hit, error)
+	// SearchVector ranks embedded items by cosine similarity, best first.
+	SearchVector(ctx context.Context, vec []float32, limit int) ([]Hit, error)
 }

@@ -5,10 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 )
+
+// ErrRejected means the embedder refused this particular input (for example
+// it is too long or malformed), as opposed to being unreachable or
+// misconfigured. Callers may stop retrying the input; they must not for
+// other errors, which usually clear up on their own.
+var ErrRejected = errors.New("embed: input rejected")
 
 // Embedder maps texts to fixed-length vectors. Vectors from different
 // models are not comparable, so a store must stick to one Embedder.
@@ -33,6 +40,14 @@ const (
 )
 
 func (o *OpenAI) Dimensions() int { return defaultDims }
+
+// ModelName names the model in use, so a store can pin it.
+func (o *OpenAI) ModelName() string {
+	if o.Model != "" {
+		return o.Model
+	}
+	return defaultModel
+}
 
 func (o *OpenAI) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
@@ -70,7 +85,12 @@ func (o *OpenAI) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embed: openai returned %s: %s", resp.Status, raw)
+		err := fmt.Errorf("embed: openai returned %s: %s", resp.Status, raw)
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+			return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+		}
+		return nil, err
 	}
 
 	var out struct {

@@ -25,6 +25,8 @@ func TestEventValidate(t *testing.T) {
 		{"zero time", func(e *Event) { e.At = time.Time{} }, ErrNoTime},
 		{"bad json", func(e *Event) { e.Payload = []byte(`{`) }, ErrBadPayload},
 		{"negative tokens", func(e *Event) { e.TokenCost = -1 }, ErrNegativeTok},
+		{"long task id", func(e *Event) { e.TaskID = string(make([]byte, 257)) }, ErrTaskIDLong},
+		{"huge payload", func(e *Event) { e.Payload = []byte(`"` + string(make([]byte, 65536)) + `"`) }, ErrPayloadBig},
 		{"empty scope field", func(e *Event) { e.Scope.User = "" }, ErrBadScope},
 	}
 	for _, c := range cases {

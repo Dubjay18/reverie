@@ -1,0 +1,1 @@
+{"session_id":"abc123","cwd":"/home/u/work/billing-api","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_use_id":"toolu_02","error":"Exit code 1\nFAIL gateway ERR_42","is_interrupt":false,"duration_ms":4187}

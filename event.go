@@ -27,6 +27,12 @@ func (s Scope) Validate() error {
 	return nil
 }
 
+// Size limits keep one hostile or buggy client from bloating the log.
+const (
+	MaxTaskID  = 256
+	MaxPayload = 64 << 10
+)
+
 type EventKind string
 
 const (
@@ -71,6 +77,8 @@ var (
 	ErrNoTime      = errors.New("reverie: event has no timestamp")
 	ErrBadPayload  = errors.New("reverie: payload is not valid json")
 	ErrNegativeTok = errors.New("reverie: negative token cost")
+	ErrTaskIDLong  = errors.New("reverie: task id is longer than 256 bytes")
+	ErrPayloadBig  = errors.New("reverie: payload is larger than 64 KB")
 )
 
 var validKinds = map[EventKind]struct{}{
@@ -96,6 +104,10 @@ func (e Event) Validate() error {
 		return ErrNoTime
 	case e.TokenCost < 0:
 		return ErrNegativeTok
+	case len(e.TaskID) > MaxTaskID:
+		return ErrTaskIDLong
+	case len(e.Payload) > MaxPayload:
+		return ErrPayloadBig
 	}
 	if _, ok := validKinds[e.Kind]; !ok {
 		return fmt.Errorf("%w: %q", ErrBadKind, e.Kind)

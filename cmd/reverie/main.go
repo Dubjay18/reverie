@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"github.com/Dubjay18/reverie"
@@ -20,6 +21,11 @@ const usage = `usage: reverie <command> [flags]
 commands:
   record   append an event
   tail     print events, then follow new ones
+  recall   print the memory pack for a task
+  expand   print the raw events behind a ref from a pack
+  hook     handle a Claude Code hook (reads the payload on stdin)
+  mcp      serve memory tools over MCP on stdio
+  embed    embed waiting items (needs REVERIE_EMBEDDINGS=openai and OPENAI_API_KEY)
 
 run "reverie <command> -h" for flags.
 `
@@ -38,6 +44,19 @@ func main() {
 		err = record(ctx, os.Args[2:])
 	case "tail":
 		err = tail(ctx, os.Args[2:])
+	case "recall":
+		err = recallCmd(ctx, os.Args[2:])
+	case "expand":
+		err = expandCmd(ctx, os.Args[2:])
+	case "mcp":
+		err = mcpCmd(ctx, os.Args[2:])
+	case "embed":
+		err = embedCmd(ctx, os.Args[2:])
+	case "hook":
+		// A hook must never break the agent: report problems on stderr, exit 0.
+		if herr := hookCmd(ctx, os.Args[2:]); herr != nil {
+			fmt.Fprintln(os.Stderr, "reverie hook:", herr)
+		}
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -54,11 +73,42 @@ type common struct {
 }
 
 func (c *common) bind(fs *flag.FlagSet) {
-	fs.StringVar(&c.db, "db", envOr("REVERIE_DB", "reverie.db"), "database file (env REVERIE_DB)")
+	fs.StringVar(&c.db, "db", defaultDB(), "database file (env REVERIE_DB)")
 	fs.StringVar(&c.scope.Tenant, "tenant", "default", "tenant")
 	fs.StringVar(&c.scope.Agent, "agent", "default", "agent")
 	fs.StringVar(&c.scope.Project, "project", "default", "project")
 	fs.StringVar(&c.scope.User, "user", "default", "user")
+}
+
+// defaultDB is one per-user file, so every project and every hook process
+// shares the same memory; a relative path would split it by working directory.
+func defaultDB() string {
+	if v := os.Getenv("REVERIE_DB"); v != "" {
+		return v
+	}
+	dir := os.Getenv("XDG_DATA_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "reverie.db"
+		}
+		dir = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dir, "reverie", "reverie.db")
+}
+
+func openEngine(path string, opts ...engine.Option) (*engine.Engine, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	// Create the file private before SQLite does: it holds everything agents
+	// did, and SQLite would use the umask (usually world-readable).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	return engine.Open(path, opts...)
 }
 
 func envOr(k, def string) string {
@@ -88,7 +138,7 @@ func record(ctx context.Context, args []string) error {
 	}
 	e := reverie.NewEvent(c.scope, *task, reverie.EventKind(*kind), reverie.Origin(*origin), p)
 
-	eng, err := engine.Open(c.db)
+	eng, err := openEngine(c.db)
 	if err != nil {
 		return err
 	}
@@ -108,7 +158,7 @@ func tail(ctx context.Context, args []string) error {
 	follow := fs.Bool("f", true, "keep waiting for new events")
 	fs.Parse(args)
 
-	eng, err := engine.Open(c.db)
+	eng, err := openEngine(c.db)
 	if err != nil {
 		return err
 	}

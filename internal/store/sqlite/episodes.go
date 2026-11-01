@@ -12,7 +12,7 @@ import (
 type episodeRepo struct{ t *txn }
 
 const episodeCols = `task_id, title, first_event, last_event, started_at, ended_at, closed, outcome,
-	events, tool_calls, errors, feedback, implicit, importance, tier, consolidated`
+	events, tool_calls, errors, feedback, implicit, importance, tier, consolidated, goal, last_error`
 
 func (r episodeRepo) Get(ctx context.Context, taskID string) (store.Episode, error) {
 	sc := r.t.sc
@@ -30,18 +30,19 @@ func (r episodeRepo) Save(ctx context.Context, ep store.Episode) error {
 	sc := r.t.sc
 	_, err := r.t.tx.ExecContext(ctx, `INSERT INTO episodes
 		(tenant, agent, project, usr, `+episodeCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tenant, agent, project, usr, task_id) DO UPDATE SET
 			title = excluded.title, first_event = excluded.first_event, last_event = excluded.last_event,
 			started_at = excluded.started_at, ended_at = excluded.ended_at, closed = excluded.closed,
 			outcome = excluded.outcome, events = excluded.events, tool_calls = excluded.tool_calls,
 			errors = excluded.errors, feedback = excluded.feedback, implicit = excluded.implicit,
-			importance = excluded.importance, tier = excluded.tier, consolidated = excluded.consolidated`,
+			importance = excluded.importance, tier = excluded.tier, consolidated = excluded.consolidated,
+			goal = excluded.goal, last_error = excluded.last_error`,
 		sc.Tenant, sc.Agent, sc.Project, sc.User,
 		ep.TaskID, ep.Title, ep.FirstEvent.String(), ep.LastEvent.String(),
 		fmtTime(ep.StartedAt), fmtTime(ep.EndedAt), b2i(ep.Closed), string(ep.Outcome),
 		ep.Events, ep.ToolCalls, ep.Errors, ep.Feedback, b2i(ep.Implicit),
-		ep.Importance, string(ep.Tier), b2i(ep.Consolidated))
+		ep.Importance, string(ep.Tier), b2i(ep.Consolidated), ep.Goal, ep.LastError)
 	return err
 }
 
@@ -90,7 +91,7 @@ func scanEpisode(s scanner) (store.Episode, error) {
 		outcome, tier               string
 	)
 	if err := s.Scan(&ep.TaskID, &ep.Title, &first, &last, &started, &ended, &closed, &outcome,
-		&ep.Events, &ep.ToolCalls, &ep.Errors, &ep.Feedback, &implicit, &ep.Importance, &tier, &consol); err != nil {
+		&ep.Events, &ep.ToolCalls, &ep.Errors, &ep.Feedback, &implicit, &ep.Importance, &tier, &consol, &ep.Goal, &ep.LastError); err != nil {
 		return store.Episode{}, err
 	}
 	var err error

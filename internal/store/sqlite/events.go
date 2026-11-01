@@ -50,6 +50,14 @@ func (r eventRepo) List(ctx context.Context, q store.EventQuery) ([]reverie.Even
 		query += ` AND id > ?`
 		args = append(args, q.After.String())
 	}
+	if q.From != (ulid.ULID{}) {
+		query += ` AND id >= ?`
+		args = append(args, q.From.String())
+	}
+	if q.To != (ulid.ULID{}) {
+		query += ` AND id <= ?`
+		args = append(args, q.To.String())
+	}
 	query += ` ORDER BY id LIMIT ?`
 	args = append(args, limit)
 

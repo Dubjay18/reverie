@@ -31,6 +31,10 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("same event id in two scopes persists in both", func(t *testing.T) { sameULIDTwoScopes(t, open(t)) })
 	t.Run("view reads committed data and cannot write", func(t *testing.T) { viewReadOnly(t, open(t)) })
 	t.Run("nested tx fails instead of hanging", func(t *testing.T) { nestedTx(t, open(t)) })
+	t.Run("index text search is scoped and tolerant", func(t *testing.T) { indexText(t, open(t)) })
+	t.Run("index vector search ranks by cosine and is scoped", func(t *testing.T) { indexVector(t, open(t)) })
+	t.Run("index upsert clears the embedding", func(t *testing.T) { indexUpsertClears(t, open(t)) })
+	t.Run("embed failures park an item until its text changes", func(t *testing.T) { embedFailuresParkItem(t, open(t)) })
 	t.Run("scopes lists scopes with data", func(t *testing.T) { scopes(t, open(t)) })
 }
 
@@ -212,7 +216,7 @@ func episodeRoundtrip(t *testing.T, s store.Store) {
 	want := store.Episode{
 		TaskID: "e1", Title: "fix bug", FirstEvent: reverie.NewID(), LastEvent: reverie.NewID(),
 		StartedAt: now, EndedAt: now.Add(time.Second), Closed: true, Outcome: store.Failure,
-		Events: 5, ToolCalls: 2, Errors: 1, Feedback: 1, Implicit: true, Importance: 0.9,
+		Goal: "ship it", LastError: "boom", Events: 5, ToolCalls: 2, Errors: 1, Feedback: 1, Implicit: true, Importance: 0.9,
 		Tier: store.Hot, Consolidated: false,
 	}
 	mustTx(t, s, base, func(x store.Tx) error {
@@ -344,4 +348,138 @@ func nestedTx(t *testing.T, s store.Store) {
 	if err == nil {
 		t.Fatal("nested Tx must fail once the context ends")
 	}
+}
+
+func put(t *testing.T, s store.Store, sc reverie.Scope, ref, text string, vec []float32) {
+	t.Helper()
+	mustTx(t, s, sc, func(x store.Tx) error {
+		return x.Index().Upsert(context.Background(), store.Item{Kind: "episode", RefID: ref, Text: text, Embedding: vec})
+	})
+}
+
+func refs(hits []store.Hit) (out []string) {
+	for _, h := range hits {
+		out = append(out, h.RefID)
+	}
+	return
+}
+
+func indexText(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	put(t, s, base, "a", "deploy failed with ERR_42 timeout", nil)
+	put(t, s, base, "b", "lint passed cleanly", nil)
+	put(t, s, variants()["user"], "z", "ERR_42 in someone else's scope", nil)
+
+	mustTx(t, s, base, func(x store.Tx) error {
+		for _, q := range []string{"ERR_42", "err 42", "what is ERR_42?", `deploy "failed"`, "timeout -- OR (", "NEAR AND NOT"} {
+			hits, err := x.Index().SearchText(ctx, q, 10)
+			if err != nil {
+				t.Fatalf("query %q must never be a syntax error: %v", q, err)
+			}
+			for _, h := range hits {
+				if h.RefID == "z" {
+					t.Fatalf("query %q leaked another scope's item", q)
+				}
+			}
+		}
+		hits, _ := x.Index().SearchText(ctx, "ERR_42", 10)
+		if got := refs(hits); len(got) != 1 || got[0] != "a" {
+			t.Fatalf("ERR_42 hits: %v", got)
+		}
+		if hits, err := x.Index().SearchText(ctx, "   ", 10); err != nil || len(hits) != 0 {
+			t.Fatalf("blank query: %v %v", hits, err)
+		}
+		return nil
+	})
+}
+
+func indexVector(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	put(t, s, base, "near", "x", []float32{1, 0.1, 0})
+	put(t, s, base, "far", "x", []float32{0, 1, 0})
+	put(t, s, base, "opposite", "x", []float32{-1, 0, 0})
+	put(t, s, base, "noembed", "x", nil)
+	put(t, s, variants()["user"], "other-scope", "x", []float32{1, 0, 0})
+
+	mustTx(t, s, base, func(x store.Tx) error {
+		hits, err := x.Index().SearchVector(ctx, []float32{2, 0, 0}, 10)
+		if err != nil {
+			return err
+		}
+		got := refs(hits)
+		want := []string{"near", "far", "opposite"}
+		if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+			t.Fatalf("vector order: got %v want %v", got, want)
+		}
+		if lim, _ := x.Index().SearchVector(ctx, []float32{1, 0, 0}, 1); len(lim) != 1 {
+			t.Fatalf("limit ignored")
+		}
+		pending, _ := x.Index().Pending(ctx, 10)
+		if len(pending) != 1 || pending[0].RefID != "noembed" {
+			t.Fatalf("pending: %+v", pending)
+		}
+		return nil
+	})
+}
+
+func indexUpsertClears(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	put(t, s, base, "a", "old text", []float32{1, 0})
+	put(t, s, base, "a", "new text", nil) // text changed, so the old vector is stale
+	mustTx(t, s, base, func(x store.Tx) error {
+		if hits, _ := x.Index().SearchVector(ctx, []float32{1, 0}, 5); len(hits) != 0 {
+			t.Fatalf("stale vector survived: %v", refs(hits))
+		}
+		if hits, _ := x.Index().SearchText(ctx, "old", 5); len(hits) != 0 {
+			t.Fatalf("stale text survived")
+		}
+		if hits, _ := x.Index().SearchText(ctx, "new", 5); len(hits) != 1 {
+			t.Fatalf("new text not found")
+		}
+		stale, err := x.Index().SetEmbedding(ctx, "episode", "a", "old text", []float32{0, 1})
+		if err != nil || stale {
+			t.Fatalf("a vector computed for old text must not apply to new text: applied=%v err=%v", stale, err)
+		}
+		applied, err := x.Index().SetEmbedding(ctx, "episode", "a", "new text", []float32{0, 1})
+		if err != nil || !applied {
+			t.Fatalf("matching text must apply: applied=%v err=%v", applied, err)
+		}
+		return nil
+	})
+	mustTx(t, s, base, func(x store.Tx) error {
+		hits, _ := x.Index().SearchVector(ctx, []float32{0, 1}, 5)
+		if len(hits) != 1 {
+			t.Fatalf("SetEmbedding not applied")
+		}
+		return nil
+	})
+}
+
+func embedFailuresParkItem(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	put(t, s, base, "poison", "x", nil)
+	put(t, s, base, "fine", "y", nil)
+	for i := 0; i < store.MaxEmbedFailures; i++ {
+		mustTx(t, s, base, func(x store.Tx) error {
+			pending, err := x.Index().Pending(ctx, 10)
+			if err != nil || len(pending) != 2 {
+				t.Fatalf("attempt %d: pending %d err %v", i, len(pending), err)
+			}
+			return x.Index().MarkEmbedFailed(ctx, "episode", "poison")
+		})
+	}
+	mustTx(t, s, base, func(x store.Tx) error {
+		pending, _ := x.Index().Pending(ctx, 10)
+		if len(pending) != 1 || pending[0].RefID != "fine" {
+			t.Fatalf("a repeatedly failing item must be parked, got %+v", pending)
+		}
+		return nil
+	})
+	put(t, s, base, "poison", "x edited", nil) // new text gets a fresh start
+	mustTx(t, s, base, func(x store.Tx) error {
+		if pending, _ := x.Index().Pending(ctx, 10); len(pending) != 2 {
+			t.Fatalf("upsert must reset failures, got %d pending", len(pending))
+		}
+		return nil
+	})
 }

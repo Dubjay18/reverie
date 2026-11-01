@@ -28,6 +28,21 @@ func (m *Store) Record(ctx context.Context, events ...reverie.Event) error {
 	return nil
 }
 
+func (m *Store) Expand(ctx context.Context, s reverie.Scope, ref reverie.Ref) ([]reverie.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []reverie.Event
+	for _, e := range m.events {
+		if e.Scope == s && e.TaskID == ref.TaskID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
 func (m *Store) Recall(ctx context.Context, s reverie.Scope, task string, budget int) (reverie.ContextPack, error) {
 	if err := ctx.Err(); err != nil {
 		return reverie.ContextPack{}, err

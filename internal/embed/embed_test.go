@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +36,17 @@ func TestOpenAIEmbedReordersByIndex(t *testing.T) {
 	}
 	if got[0][0] != 1 || got[1][0] != 2 {
 		t.Fatalf("vectors not in input order: %v %v", got[0][0], got[1][0])
+	}
+}
+
+func TestOpenAIRejectedInputIsDistinguishedFromOutage(t *testing.T) {
+	for code, want := range map[int]bool{400: true, 413: true, 422: true, 401: false, 429: false, 500: false, 503: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "x", code) }))
+		_, err := (&OpenAI{APIKey: "k", BaseURL: srv.URL}).Embed(context.Background(), []string{"a"})
+		srv.Close()
+		if errors.Is(err, ErrRejected) != want {
+			t.Errorf("status %d: ErrRejected=%v, want %v (err %v)", code, errors.Is(err, ErrRejected), want, err)
+		}
 	}
 }
 

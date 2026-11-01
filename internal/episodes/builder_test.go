@@ -121,3 +121,37 @@ func TestSweepAbandonsIdleOnly(t *testing.T) {
 		t.Fatalf("abandoned task must stay closed, got %v", err)
 	}
 }
+
+func TestGistKeepsFirstUserGoalAndLastError(t *testing.T) {
+	st := open(t)
+	userMsg := reverie.NewEvent(sc, "k", reverie.Message, reverie.OriginUser, []byte(`{"text":"fix   the\nlogin bug"}`))
+	agentMsg := reverie.NewEvent(sc, "k", reverie.Message, reverie.OriginAgent, []byte(`{"text":"on it"}`))
+	ep, err := apply(t, st, agentMsg, userMsg,
+		ev("k", reverie.ToolResult, `{"error":"first failure"}`),
+		ev("k", reverie.ToolResult, `{"error":"second failure"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.Goal != "fix the login bug" || ep.LastError != "second failure" {
+		t.Fatalf("goal=%q lastError=%q", ep.Goal, ep.LastError)
+	}
+}
+
+func TestControlCharactersAreStrippedFromDisplayedFields(t *testing.T) {
+	st := open(t)
+	ep, err := apply(t, st,
+		ev("k", reverie.TaskStarted, `{"description":"deploy\u001b[31m RED \u0007bell"}`),
+		reverie.NewEvent(sc, "k", reverie.Message, reverie.OriginUser, []byte(`{"text":"fix\u001b]0;pwned\u0007 it"}`)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{ep.Title, ep.Goal} {
+		for _, r := range s {
+			if r < 0x20 || r == 0x7f {
+				t.Fatalf("control character %U survived in %q", r, s)
+			}
+		}
+	}
+}

@@ -25,7 +25,10 @@ type Config struct {
 
 // Store keeps two pools: db serialises writers, rdb serves read-only views
 // concurrently (WAL lets readers run beside the writer).
-type Store struct{ db, rdb *sql.DB }
+type Store struct {
+	db, rdb *sql.DB
+	dims    int // pinned embedding dimension, 0 when none
+}
 
 var _ store.Store = (*Store)(nil)
 
@@ -53,7 +56,7 @@ func Open(path string, cfg Config) (*Store, error) {
 		return nil, err
 	}
 	rdb.SetMaxOpenConns(4)
-	return &Store{db: db, rdb: rdb}, nil
+	return &Store{db: db, rdb: rdb, dims: cfg.Dimensions}, nil
 }
 
 func (s *Store) Close() error { return errors.Join(s.rdb.Close(), s.db.Close()) }
@@ -99,19 +102,21 @@ func (s *scoped) run(ctx context.Context, db *sql.DB, fn func(store.Tx) error) e
 		return err
 	}
 	defer tx.Rollback() // no-op after Commit
-	if err := fn(&txn{tx: tx, sc: s.sc}); err != nil {
+	if err := fn(&txn{tx: tx, sc: s.sc, dims: s.s.dims}); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 type txn struct {
-	tx *sql.Tx
-	sc reverie.Scope
+	tx   *sql.Tx
+	sc   reverie.Scope
+	dims int
 }
 
 func (t *txn) Events() store.EventRepo     { return eventRepo{t} }
 func (t *txn) Episodes() store.EpisodeRepo { return episodeRepo{t} }
+func (t *txn) Index() store.IndexRepo      { return indexRepo{t} }
 
 // checkMeta pins the embedding model and dimension on first use and refuses a
 // different one afterwards: mixing embedders silently corrupts similarity.

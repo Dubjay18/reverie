@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Dubjay18/reverie"
 	"github.com/Dubjay18/reverie/internal/store"
@@ -52,14 +55,21 @@ func Apply(ctx context.Context, tx store.Tx, ev reverie.Event) (store.Episode, e
 	switch ev.Kind {
 	case reverie.TaskStarted:
 		if ep.Title == "" {
-			ep.Title = stringField(ev.Payload, "description")
+			ep.Title = clip(stringField(ev.Payload, "description"))
 		}
 		ep.Implicit = false
 	case reverie.ToolCalled:
 		ep.ToolCalls++
+	case reverie.Message:
+		if ep.Goal == "" && ev.Origin == reverie.OriginUser {
+			ep.Goal = clip(stringField(ev.Payload, "text"))
+		}
 	case reverie.ToolResult:
 		if hasField(ev.Payload, "error") {
 			ep.Errors++
+			if msg := stringField(ev.Payload, "error"); msg != "" {
+				ep.LastError = clip(msg)
+			}
 		}
 	case reverie.Feedback:
 		ep.Feedback++
@@ -117,11 +127,12 @@ func importance(ep store.Episode) float64 {
 	return min(max(v, 0), 1)
 }
 
-// parseOutcome treats an unknown or missing outcome as partial: the task
-// ended, but we cannot claim it succeeded.
+// parseOutcome treats a missing or unrecognised outcome as partial: the task
+// ended, but we cannot claim it succeeded. A source that has no verdict says
+// "unknown" explicitly.
 func parseOutcome(s string) store.Outcome {
 	switch o := store.Outcome(s); o {
-	case store.Success, store.Failure, store.Partial:
+	case store.Success, store.Failure, store.Partial, store.Unknown:
 		return o
 	}
 	return store.Partial
@@ -145,4 +156,92 @@ func hasField(payload []byte, key string) bool {
 	}
 	v, ok := m[key]
 	return ok && v != nil
+}
+
+const (
+	indexTextCap  = 4000
+	indexEventCap = 500
+)
+
+// IndexText is what full-text and vector search see for an episode: its
+// title, outcome, and every string found in its events' payloads, capped.
+func IndexText(ep store.Episode, events []reverie.Event) string {
+	var b strings.Builder
+	b.WriteString(ep.Title)
+	b.WriteString(" ")
+	b.WriteString(string(ep.Outcome))
+	for _, ev := range events {
+		var v any
+		if json.Unmarshal(ev.Payload, &v) != nil {
+			continue
+		}
+		var part strings.Builder
+		collectStrings(v, &part, 0)
+		s := part.String()
+		if len(s) > indexEventCap {
+			s = s[:indexEventCap]
+		}
+		b.WriteString("\n")
+		b.WriteString(s)
+		if b.Len() >= indexTextCap {
+			break
+		}
+	}
+	out := b.String()
+	if len(out) > indexTextCap {
+		out = out[:indexTextCap]
+	}
+	return strings.ToValidUTF8(out, "")
+}
+
+func collectStrings(v any, b *strings.Builder, depth int) {
+	if depth > 4 {
+		return
+	}
+	switch t := v.(type) {
+	case string:
+		b.WriteString(t)
+		b.WriteString(" ")
+	case []any:
+		for _, e := range t {
+			collectStrings(e, b, depth+1)
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			collectStrings(t[k], b, depth+1)
+		}
+	}
+}
+
+// Index writes the episode's search text to the index. Call it when an
+// episode closes.
+func Index(ctx context.Context, tx store.Tx, ep store.Episode) error {
+	events, err := tx.Events().List(ctx, store.EventQuery{TaskID: ep.TaskID, Limit: store.MaxLimit})
+	if err != nil {
+		return err
+	}
+	return tx.Index().Upsert(ctx, store.Item{Kind: "episode", RefID: ep.TaskID, Text: IndexText(ep, events)})
+}
+
+const gistCap = 160
+
+// clip keeps a one-line, length-capped excerpt for display.
+func clip(s string) string {
+	// Fields folds whitespace controls; Map drops the rest (ESC and other
+	// C0/C1 controls would otherwise reach a terminal or a model prompt).
+	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)), " ")
+	if len(s) <= gistCap {
+		return s
+	}
+	return strings.ToValidUTF8(s[:gistCap], "") + "…"
 }
