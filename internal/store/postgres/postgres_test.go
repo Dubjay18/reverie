@@ -2,96 +2,112 @@ package postgres
 
 import (
 	"context"
-	"hash/fnv"
-	"math"
+	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/internal/store"
+	"github.com/Dubjay18/reverie/internal/store/storetest"
+	"github.com/jackc/pgx/v5"
 )
 
-// bagEmbedder hashes words into buckets, so texts sharing words are close.
-type bagEmbedder struct{}
+var (
+	dsnOnce      sync.Once
+	sharedDSN    string
+	containerID  string
+	dsnSkipError string
+)
 
-func (bagEmbedder) Dimensions() int { return 1536 }
-
-func (bagEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		v := make([]float32, 1536)
-		for _, w := range strings.Fields(strings.ToLower(t)) {
-			h := fnv.New32a()
-			h.Write([]byte(w))
-			v[h.Sum32()%1536]++
-		}
-		var norm float64
-		for _, x := range v {
-			norm += float64(x * x)
-		}
-		if norm > 0 {
-			for j := range v {
-				v[j] /= float32(math.Sqrt(norm))
-			}
-		}
-		out[i] = v
+func testDSN(t *testing.T) string {
+	t.Helper()
+	if env := os.Getenv("REVERIE_TEST_DSN"); env != "" {
+		return env
 	}
-	return out, nil
+	dsnOnce.Do(func() {
+		if _, err := exec.LookPath("docker"); err != nil {
+			dsnSkipError = "REVERIE_TEST_DSN not set and docker not found"
+			return
+		}
+		out, err := exec.Command("docker", "run", "-d", "--rm",
+			"-e", "POSTGRES_PASSWORD=reverie",
+			"-e", "POSTGRES_DB=reverie",
+			"-P", "postgres:16-alpine").CombinedOutput()
+		if err != nil {
+			dsnSkipError = fmt.Sprintf("docker run postgres failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			return
+		}
+		containerID = strings.TrimSpace(string(out))
+		portOut, err := exec.Command("docker", "port", containerID, "5432/tcp").CombinedOutput()
+		if err != nil {
+			_ = exec.Command("docker", "rm", "-f", containerID).Run()
+			dsnSkipError = fmt.Sprintf("docker port failed: %v", err)
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(portOut)), "\n")
+		hostPort := lines[0]
+		if idx := strings.LastIndex(hostPort, ":"); idx >= 0 {
+			hostPort = "127.0.0.1:" + hostPort[idx+1:]
+		}
+		dsn := fmt.Sprintf("postgres://postgres:reverie@%s/reverie?sslmode=disable", hostPort)
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			conn, err := pgx.Connect(ctx, dsn)
+			cancel()
+			if err == nil {
+				_ = conn.Close(context.Background())
+				sharedDSN = dsn
+				return
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		_ = exec.Command("docker", "rm", "-f", containerID).Run()
+		dsnSkipError = "timed out waiting for postgres test container"
+	})
+	if dsnSkipError != "" {
+		t.Skip(dsnSkipError)
+	}
+	return sharedDSN
 }
 
-func TestSearch(t *testing.T) {
-	dsn := os.Getenv("REVERIE_TEST_DSN")
-	if dsn == "" {
-		t.Skip("REVERIE_TEST_DSN not set (needs Postgres with pgvector)")
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if containerID != "" {
+		_ = exec.Command("docker", "rm", "-f", containerID).Run()
 	}
-	ctx := context.Background()
-	s, err := Open(ctx, dsn, bagEmbedder{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	os.Exit(code)
+}
 
-	sc := reverie.Scope{Tenant: "t-" + reverie.NewID().String(), Agent: "a", Project: "p", User: "u"}
-	other := sc
-	other.Tenant += "-other"
-
-	err = s.Put(ctx,
-		Item{ID: "1", Scope: sc, Kind: "fact", Text: "deploys run through the staging cluster first"},
-		Item{ID: "2", Scope: sc, Kind: "fact", Text: "the user prefers tabs over spaces"},
-		Item{ID: "3", Scope: sc, Kind: "episode", Text: "rolled back a failed staging deploy"},
-		Item{ID: "x", Scope: other, Kind: "fact", Text: "staging deploy secrets live in vault"},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hits, err := s.Search(ctx, sc, "staging deploy", 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) == 0 {
-		t.Fatal("no hits")
-	}
-	for _, h := range hits {
-		if h.ID == "x" {
-			t.Fatal("leaked an item from another scope")
+func TestConformance(t *testing.T) {
+	baseDSN := testDSN(t)
+	var seq int
+	storetest.Run(t, func(t *testing.T) store.Store {
+		seq++
+		schema := fmt.Sprintf("s_%d_%d", time.Now().UnixNano(), seq)
+		ctx := context.Background()
+		conn, err := pgx.Connect(ctx, baseDSN)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if top := hits[0].ID; top != "1" && top != "3" {
-		t.Errorf("top hit = %q, want a staging/deploy item", top)
-	}
-
-	// Upsert replaces in place.
-	if err := s.Put(ctx, Item{ID: "2", Scope: sc, Kind: "fact", Text: "the user prefers spaces"}); err != nil {
-		t.Fatal(err)
-	}
-	hits, err = s.Search(ctx, sc, "tabs", 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, h := range hits {
-		if h.ID == "2" && strings.Contains(h.Text, "tabs") {
-			t.Error("upsert did not replace text")
+		_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+		_ = conn.Close(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
+		sep := "&"
+		if !strings.Contains(baseDSN, "?") {
+			sep = "?"
+		}
+		scopedDSN := baseDSN + sep + "search_path=" + schema
+		s, err := Open(ctx, scopedDSN, Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	})
 }

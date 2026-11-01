@@ -7,8 +7,11 @@ import (
 	"os"
 	"time"
 
+	"net/http"
+
 	"github.com/Dubjay18/reverie"
 	"github.com/Dubjay18/reverie/adapters/hook"
+	revhttp "github.com/Dubjay18/reverie/adapters/http"
 	"github.com/Dubjay18/reverie/adapters/mcp"
 	"github.com/Dubjay18/reverie/engine"
 	"github.com/Dubjay18/reverie/internal/dream"
@@ -97,6 +100,31 @@ func mcpCmd(ctx context.Context, args []string) error {
 	defer eng.Close()
 	srv := &mcp.Server{Mem: eng, Scope: *sc, Version: "0.1"}
 	return srv.Serve(ctx, os.Stdin, os.Stdout)
+}
+
+func serveCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	db := fs.String("db", defaultDB(), "database file (env REVERIE_DB)")
+	addr := fs.String("addr", envOr("REVERIE_ADDR", "127.0.0.1:8080"), "listen address (env REVERIE_ADDR)")
+	sc := agentScope(fs, cwdName())
+	fs.Parse(args)
+	opts := append(embedOpts(), llmOpts()...)
+	eng, err := openEngine(*db, opts...)
+	if err != nil {
+		return err
+	}
+	defer eng.Close()
+	h := &revhttp.Server{Mem: eng, DefaultScope: *sc}
+	srv := &http.Server{Addr: *addr, Handler: h}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Shutdown(context.Background())
+	}()
+	err = srv.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 func recallCmd(ctx context.Context, args []string) error {

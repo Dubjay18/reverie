@@ -1,0 +1,54 @@
+id: continuity
+category: continuity
+description: Multi-session continuity across 25 filler sessions after an early architectural decision, under a strict 600-token query budget.
+sessions:
+  - task_id: sess-cont-arch
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ledger
+      user: jay
+    at: "2026-02-01T10:00:00Z"
+    remember:
+      - entity: ledger
+        relation: decision
+        value: "Use TigerBeetle double-entry settlement idempotency keys"
+        source: user_stated
+    events:
+      - kind: message
+        origin: user_input
+        text: "We decided that ledger settlement must use TigerBeetle double-entry settlement idempotency keys."
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Adopted TigerBeetle idempotency keys"
+    pin_values:
+      - "Use TigerBeetle double-entry settlement idempotency keys"
+  - task_id: sess-cont-filler
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ledger
+      user: jay
+    at: "2026-02-15T10:00:00Z"
+    filler_count: 25
+    events:
+      - kind: message
+        origin: user_input
+        text: "Routine CI lint and formatting pass on service modules"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "CI lint green"
+queries:
+  - id: continuity-q1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ledger
+      user: jay
+    at: "2026-03-01T10:00:00Z"
+    task: "Implement ledger settlement retry handler"
+    budget: 600
+    must_contain:
+      - "TigerBeetle double-entry settlement idempotency keys"

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dubjay18/reverie"
 	"github.com/Dubjay18/reverie/internal/guard"
+	"github.com/Dubjay18/reverie/internal/ontology"
 	"github.com/Dubjay18/reverie/internal/rank"
 	"github.com/Dubjay18/reverie/internal/store"
 )
@@ -188,11 +189,23 @@ func gatherFacts(ctx context.Context, tx store.Tx, q Query, now time.Time, rel m
 		}
 		add(top)
 	}
+	onto := ontology.Default()
 	for id, f := range byID {
 		if !q.AsOf.IsZero() && f.RecordedAt.After(q.AsOf) {
 			continue
 		}
 		age := now.Sub(f.RecordedAt)
+		if !f.Pinned {
+			if rel, err := onto.Relation(f.Relation); err == nil && rel.TTLDays > 0 {
+				refAt := f.ValidFrom
+				if f.RecordedAt.After(refAt) {
+					refAt = f.RecordedAt
+				}
+				if !refAt.IsZero() && now.Sub(refAt) >= time.Duration(rel.TTLDays)*24*time.Hour {
+					continue
+				}
+			}
+		}
 		recency := math.Pow(0.5, float64(max(age, 0))/float64(halfLife))
 		score := wRelevance*rel[kindFact+"/"+id] + wRecency*recency + wImportance*f.Confidence
 		if f.Pinned || f.Status == reverie.FactContested {

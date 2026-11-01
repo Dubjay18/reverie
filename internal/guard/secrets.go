@@ -91,7 +91,13 @@ var instructionRE = regexp.MustCompile(`(?i)\b(` +
 	`do\s+not\s+(?:tell|reveal|mention|inform)|` +
 	`(?:run|execute)\s+(?:the\s+following|this|these)|` +
 	`curl\s|wget\s|sudo\s|rm\s+-rf|base64\s+-d|\|\s*(?:sh|bash)\b|` +
-	`exfiltrat|send\s+(?:it|this|them|the\s+\w+)\s+to\b` +
+	`exfiltrat|send\s+(?:it|this|them|the\s+\w+)\s+to\b|` +
+	`when(?:ever)?\s+(?:the\s+)?(?:user|agent|session|prompt|asked|deploy\w*|quer\w*)\b[^.\n]{0,120}\b(?:run|execute|call|send|bypass|override|ignore|output|print|append|inject|disable)|` +
+	`(?:on|in)\s+(?:the\s+)?(?:next|future|subsequent|every)\s+(?:session|turn|run|prompt|deploy\w*)\b|` +
+	`if\s+(?:the\s+)?(?:user|agent|queried|asked)\b[^.\n]{0,120}\b(?:respond|reply|output|execute|run|bypass|override|ignore)|` +
+	`bypass\s+(?:auth\w*|security|check\w*|validation|guard|policy)|` +
+	`override\s+(?:all|security|system|policy|instructions?)|` +
+	`sleeper\s+(?:trigger|instruction|payload)` +
 	`)`)
 
 // LooksLikeInstruction reports whether text reads as a command aimed at a

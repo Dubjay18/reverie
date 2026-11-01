@@ -22,6 +22,7 @@ import (
 	"github.com/Dubjay18/reverie/internal/recall"
 	"github.com/Dubjay18/reverie/internal/store"
 	"github.com/Dubjay18/reverie/internal/store/sqlite"
+	"github.com/Dubjay18/reverie/internal/telemetry"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -33,6 +34,7 @@ type Engine struct {
 	tok          recall.Tokenizer
 	embedTimeout time.Duration // bound on the per-query embedding call in Recall
 	onto         *ontology.Ontology
+	tracer       *telemetry.Tracer
 	kick         chan struct{}
 	stop         context.CancelFunc
 	done         chan struct{}
@@ -52,6 +54,18 @@ func WithOntology(o *ontology.Ontology) Option { return func(g *Engine) { g.onto
 
 // WithLLM configures the language model used by the Distill dream phase.
 func WithLLM(m llm.LLM) Option { return func(g *Engine) { g.model = m } }
+
+// WithClock overrides the clock used by Engine operations (for deterministic tests and evals).
+func WithClock(now func() time.Time) Option {
+	return func(g *Engine) {
+		if now != nil {
+			g.now = now
+		}
+	}
+}
+
+// WithTracer attaches a telemetry Tracer for spans and token metering.
+func WithTracer(t *telemetry.Tracer) Option { return func(g *Engine) { g.tracer = t } }
 
 // Open returns a Memory backed by a SQLite file.
 func Open(path string, opts ...Option) (*Engine, error) {
@@ -80,6 +94,11 @@ func New(st store.Store, opts ...Option) *Engine {
 	for _, o := range opts {
 		o(e)
 	}
+	if e.tracer == nil {
+		e.tracer = telemetry.NewTracer(nil)
+	}
+	e.emb = telemetry.WrapEmbedder(e.emb, e.tracer)
+	e.model = telemetry.WrapLLM(e.model, e.tracer)
 	if e.emb != nil {
 		var ctx context.Context
 		ctx, e.stop = context.WithCancel(context.Background())
@@ -100,6 +119,9 @@ func (e *Engine) Close() error {
 
 // Store exposes the store for tools that read it directly (CLI tail).
 func (e *Engine) Store() store.Store { return e.st }
+
+// Tracer returns the engine's telemetry tracer and token meter.
+func (e *Engine) Tracer() *telemetry.Tracer { return e.tracer }
 
 // MaxFutureSkew bounds how far ahead of the engine's clock an event may be
 // stamped. A far-future time would keep its episode "recently active" forever.
@@ -208,6 +230,15 @@ func (e *Engine) Sweep(ctx context.Context, now time.Time, idle time.Duration) (
 // plus vector similarity when an embedder is configured; if the embedder
 // fails, recall degrades to full-text rather than failing.
 func (e *Engine) Recall(ctx context.Context, s reverie.Scope, task string, budget int) (reverie.ContextPack, error) {
+	ctx, sp := e.tracer.Start(ctx, "recall", map[string]any{
+		"operation": "search_memory",
+		"tenant":    s.Tenant,
+		"agent":     s.Agent,
+		"project":   s.Project,
+		"user":      s.User,
+		"task":      task,
+		"budget":    budget,
+	})
 	q := recall.Query{Task: task, Budget: budget, Now: e.now(), Tokenizer: e.tok}
 	if e.emb != nil && task != "" {
 		// A slow or hung embedder must not stall recall (the MCP loop is serial).
@@ -218,17 +249,30 @@ func (e *Engine) Recall(ctx context.Context, s reverie.Scope, task string, budge
 			q.Vector = vecs[0]
 		}
 	}
-	return recall.Run(ctx, e.st.For(s), q)
+	pack, err := recall.Run(ctx, e.st.For(s), q)
+	sp.SetAttr("tokens", pack.Tokens)
+	sp.SetAttr("dropped", pack.Dropped)
+	sp.End(err)
+	return pack, err
 }
 
 // MaxExpand caps the events one Expand call returns.
 const MaxExpand = 500
 
 func (e *Engine) Expand(ctx context.Context, s reverie.Scope, ref reverie.Ref) ([]reverie.Event, error) {
+	ctx, sp := e.tracer.Start(ctx, "expand", map[string]any{
+		"operation": "expand_memory",
+		"tenant":    s.Tenant,
+		"agent":     s.Agent,
+		"project":   s.Project,
+		"user":      s.User,
+		"ref":       ref.String(),
+	})
 	var out []reverie.Event
+	var err error
 	if ref.FactID != "" {
 		// the events behind a fact: every task it came from, oldest first
-		err := e.st.For(s).View(ctx, func(tx store.Tx) error {
+		err = e.st.For(s).View(ctx, func(tx store.Tx) error {
 			f, err := tx.Facts().Get(ctx, ref.FactID)
 			if err != nil {
 				return err
@@ -246,12 +290,14 @@ func (e *Engine) Expand(ctx context.Context, s reverie.Scope, ref reverie.Ref) (
 			}
 			return nil
 		})
-		return out, err
+	} else {
+		err = e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
+			out, err = tx.Events().List(ctx, store.EventQuery{TaskID: ref.TaskID, From: ref.From, To: ref.To, Limit: MaxExpand})
+			return err
+		})
 	}
-	err := e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
-		out, err = tx.Events().List(ctx, store.EventQuery{TaskID: ref.TaskID, From: ref.From, To: ref.To, Limit: MaxExpand})
-		return err
-	})
+	sp.SetAttr("events", len(out))
+	sp.End(err)
 	return out, err
 }
 
@@ -652,6 +698,7 @@ func (e *Engine) Dream(ctx context.Context, s reverie.Scope, trigger string, bud
 		Now:      e.now().UTC(),
 		LLM:      e.model,
 		Ontology: e.onto,
+		Tracer:   e.tracer,
 	})
 }
 

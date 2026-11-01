@@ -1,0 +1,244 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Reverie Memory API",
+    "version": "1.0.0",
+    "description": "HTTP JSON adapter for Reverie memory kernel (Record, Recall, Expand, Remember, Forget, Dream, Revert)."
+  },
+  "paths": {
+    "/v1/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Health check",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/v1/record": {
+      "post": {
+        "operationId": "recordEvents",
+        "summary": "Record raw events in a scope",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RecordRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Recorded event IDs" },
+          "400": { "description": "Invalid event or scope" }
+        }
+      }
+    },
+    "/v1/recall": {
+      "post": {
+        "operationId": "recallMemory",
+        "summary": "Recall a budgeted, cited context pack",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RecallRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "ContextPack and rendered markdown" }
+        }
+      }
+    },
+    "/v1/expand": {
+      "post": {
+        "operationId": "expandRef",
+        "summary": "Expand a citation ref back to raw events",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExpandRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Expanded raw events" }
+        }
+      }
+    },
+    "/v1/remember": {
+      "post": {
+        "operationId": "rememberFact",
+        "summary": "State a fact synchronously",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RememberRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Created or updated fact" }
+        }
+      }
+    },
+    "/v1/forget": {
+      "post": {
+        "operationId": "forgetFact",
+        "summary": "Tombstone a fact by ref and journal the change",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ForgetRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Run ID that can be passed to /v1/revert" }
+        }
+      }
+    },
+    "/v1/dream": {
+      "post": {
+        "operationId": "runDream",
+        "summary": "Run sleep-time dream consolidation for a scope",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DreamRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Dream run report" }
+        }
+      }
+    },
+    "/v1/revert": {
+      "post": {
+        "operationId": "revertRun",
+        "summary": "Revert a dream or forget run by run_id",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RevertRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Number of reverted journal entries" }
+        }
+      }
+    },
+    "/v1/facts": {
+      "get": {
+        "operationId": "listFacts",
+        "summary": "List active or historical facts in a scope",
+        "responses": {
+          "200": { "description": "Matching facts" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Scope": {
+        "type": "object",
+        "required": ["tenant", "agent", "project", "user"],
+        "properties": {
+          "tenant": { "type": "string" },
+          "agent": { "type": "string" },
+          "project": { "type": "string" },
+          "user": { "type": "string" }
+        }
+      },
+      "RecordItem": {
+        "type": "object",
+        "required": ["task_id", "kind"],
+        "properties": {
+          "id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "origin": { "type": "string" },
+          "at": { "type": "string", "format": "date-time" },
+          "text": { "type": "string" },
+          "payload": { "type": "object" },
+          "token_cost": { "type": "integer" }
+        }
+      },
+      "RecordRequest": {
+        "type": "object",
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RecordItem" }
+          },
+          "task_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "origin": { "type": "string" },
+          "text": { "type": "string" },
+          "payload": { "type": "object" }
+        }
+      },
+      "RecallRequest": {
+        "type": "object",
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "task": { "type": "string" },
+          "budget": { "type": "integer" }
+        }
+      },
+      "ExpandRequest": {
+        "type": "object",
+        "required": ["ref"],
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "ref": { "type": "string" }
+        }
+      },
+      "RememberRequest": {
+        "type": "object",
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "text": { "type": "string" },
+          "entity": { "type": "string" },
+          "relation": { "type": "string" },
+          "value": { "type": "string" },
+          "source": { "type": "string" },
+          "task_id": { "type": "string" }
+        }
+      },
+      "ForgetRequest": {
+        "type": "object",
+        "required": ["ref"],
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "ref": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      },
+      "DreamRequest": {
+        "type": "object",
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "trigger": { "type": "string" },
+          "budget": { "type": "integer" }
+        }
+      },
+      "RevertRequest": {
+        "type": "object",
+        "required": ["run_id"],
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "run_id": { "type": "string" }
+        }
+      }
+    }
+  }
+}

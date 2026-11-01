@@ -13,6 +13,7 @@ import (
 	"github.com/Dubjay18/reverie/internal/llm"
 	"github.com/Dubjay18/reverie/internal/ontology"
 	"github.com/Dubjay18/reverie/internal/store"
+	"github.com/Dubjay18/reverie/internal/telemetry"
 )
 
 const DefaultLeaseTTL = 5 * time.Minute
@@ -34,6 +35,7 @@ type Report struct {
 	Merged       int      `json:"merged"`
 	Superseded   int      `json:"superseded"`
 	Contested    int      `json:"contested"`
+	Forgotten    int      `json:"forgotten"`
 	Rejected     int      `json:"rejected"`
 	TokensSpent  int      `json:"tokens_spent"`
 	TokensBudget int      `json:"tokens_budget"`
@@ -53,6 +55,7 @@ type Config struct {
 	Now        time.Time
 	LLM        llm.LLM
 	Ontology   *ontology.Ontology
+	Tracer     *telemetry.Tracer
 	Phases     []Phase                 // optional override; defaults to Replay -> Distill -> ReconcileReflect
 	BeforeSave func(tx store.Tx) error // test hook to inject mid-commit failure
 }
@@ -89,6 +92,20 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 		trigger = "manual"
 	}
 	runID := facts.NewRunID("dream")
+	tr := cfg.Tracer
+	if tr == nil {
+		tr = telemetry.NewTracer(nil)
+	}
+	ctx, runSpan := tr.Start(ctx, "dream.run", map[string]any{
+		"operation": "dream",
+		"trigger":   trigger,
+		"run_id":    runID,
+		"budget":    budgetLimit,
+	})
+	var runErr error
+	defer func() {
+		runSpan.End(runErr)
+	}()
 
 	var acquired bool
 	if err := sc.Tx(ctx, func(tx store.Tx) error {
@@ -135,12 +152,14 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 		Budget:         NewBudget(budgetLimit),
 		EpisodeOrigins: map[string][]reverie.Origin{},
 	}
+	model := telemetry.WrapLLM(cfg.LLM, tr)
 	phases := cfg.Phases
 	if len(phases) == 0 {
 		phases = []Phase{
 			ReplayPhase{},
-			DistillPhase{LLM: cfg.LLM, Ontology: onto},
+			DistillPhase{LLM: model, Ontology: onto},
 			ReconcileReflectPhase{Ontology: onto},
+			ForgetPhase{Ontology: onto},
 		}
 	}
 	view := NewReadView(sc)
@@ -160,12 +179,24 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 	}
 	for _, ph := range phases {
 		if err := ctx.Err(); err != nil {
+			runErr = err
 			return Report{}, err
 		}
 		if err := renewLease(); err != nil {
+			runErr = err
 			return Report{}, err
 		}
-		if err := ph.Run(ctx, view, st); err != nil {
+		beforeSpent := st.Budget.Spent()
+		pctx, phSpan := tr.Start(ctx, "dream.phase."+ph.Name(), map[string]any{
+			"operation": "dream_phase",
+			"phase":     ph.Name(),
+			"run_id":    runID,
+		})
+		err := ph.Run(pctx, view, st)
+		phSpan.SetAttr("tokens_spent", st.Budget.Spent()-beforeSpent)
+		phSpan.End(err)
+		if err != nil {
+			runErr = err
 			return Report{}, err
 		}
 	}
@@ -192,6 +223,29 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 			return ErrLeaseLost
 		}
 		for _, p := range st.Proposals {
+			if p.Op == "forget" {
+				targetID := p.TargetFactID
+				if targetID == "" {
+					targetID = p.Fact.ID
+				}
+				cur, err := tx.Facts().Get(ctx, targetID)
+				if err != nil {
+					rep.Rejected++
+					continue
+				}
+				// Always run the deterministic Validate gate last before writing,
+				// including Forget proposals.
+				if err := guard.ValidateForget(cur); err != nil {
+					rep.Rejected++
+					continue
+				}
+				if err := facts.Forget(ctx, tx, targetID, reverie.SourceDistilled, now, runID); err != nil {
+					rep.Rejected++
+					continue
+				}
+				rep.Forgotten++
+				continue
+			}
 			live, err := tx.Facts().Live(ctx, p.Fact.Entity, p.Fact.Relation)
 			if err != nil {
 				return err
@@ -288,8 +342,17 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 		return tx.Dreams().Release(ctx, runID)
 	})
 	if err != nil {
+		runErr = err
 		return Report{}, err
 	}
 	committed = true
+	runSpan.SetAttr("episodes", rep.Episodes)
+	runSpan.SetAttr("learned", rep.Learned)
+	runSpan.SetAttr("merged", rep.Merged)
+	runSpan.SetAttr("superseded", rep.Superseded)
+	runSpan.SetAttr("contested", rep.Contested)
+	runSpan.SetAttr("forgotten", rep.Forgotten)
+	runSpan.SetAttr("rejected", rep.Rejected)
+	runSpan.SetAttr("tokens_spent", rep.TokensSpent)
 	return rep, nil
 }

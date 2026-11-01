@@ -61,11 +61,13 @@ func (v txReadView) QueryFacts(ctx context.Context, q store.FactQuery) (out []re
 // Proposal is a candidate fact mutation produced by a Phase before Validate
 // and Commit.
 type Proposal struct {
-	Phase      string
-	Fact       reverie.Fact // proposed fact (SourceDistilled or SourceInferred)
-	Rationale  string
-	Tokens     int
-	AnchorTime time.Time // event timestamp that anchored relative time normalization
+	Phase        string
+	Op           string       // ""/"assert" (default) or "forget" (tombstone TargetFactID)
+	TargetFactID string       // set when Op == "forget"
+	Fact         reverie.Fact // proposed fact (SourceDistilled or SourceInferred)
+	Rationale    string
+	Tokens       int
+	AnchorTime   time.Time // event timestamp that anchored relative time normalization
 }
 
 // Cluster groups related unconsolidated episodes selected by Replay.

@@ -129,3 +129,19 @@ var secretNameRE = regexp.MustCompile(`(?i)\b(pass(?:word|wd)?|secret|api[_-]?ke
 func sensitiveEntityOrRelation(entity, relation string) bool {
 	return secretNameRE.MatchString(entity) || secretNameRE.MatchString(relation)
 }
+
+// ValidateForget applies the deterministic safety gate (ARCHITECTURE.md §9)
+// to a Forget-phase proposal (TTL expiry, confidence decay, or compression
+// tombstone) targeting an existing fact row.
+//
+// Pinned and user_stated facts are immutable to dreams; non-live facts cannot
+// be tombstoned again.
+func ValidateForget(target reverie.Fact) error {
+	if !target.Live() {
+		return errors.New("guard: cannot forget a non-live fact")
+	}
+	if target.Pinned || target.Source == reverie.SourceUser {
+		return ErrImmutableTarget
+	}
+	return nil
+}

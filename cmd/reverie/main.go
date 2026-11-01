@@ -25,6 +25,7 @@ commands:
   expand   print the raw events behind a ref from a pack
   hook     handle a Claude Code hook (reads the payload on stdin)
   mcp      serve memory tools over MCP on stdio
+  serve    serve memory API over HTTP (JSON + /openapi.json)
   embed    embed waiting items (needs REVERIE_EMBEDDINGS=openai and OPENAI_API_KEY)
   remember state a fact now (stored as your own words)
   facts    list what is believed (-asof to see the past, -contested for disputes)
@@ -58,6 +59,8 @@ func main() {
 		err = expandCmd(ctx, os.Args[2:])
 	case "mcp":
 		err = mcpCmd(ctx, os.Args[2:])
+	case "serve":
+		err = serveCmd(ctx, os.Args[2:])
 	case "embed":
 		err = embedCmd(ctx, os.Args[2:])
 	case "scrub":
