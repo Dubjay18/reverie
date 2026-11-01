@@ -45,6 +45,8 @@ type Tx interface {
 	Facts() FactRepo
 	Journal() JournalRepo
 	Dreams() DreamRepo
+	Skills() SkillRepo
+	Insights() InsightRepo
 }
 
 type EventRepo interface {
@@ -193,7 +195,7 @@ type JournalEntry struct {
 	RunID          string // empty for a manual change
 	Phase          string
 	Op             string
-	TargetKind     string // "fact"
+	TargetKind     string // "fact", "episode", "skill" (TargetID "<id>@v<n>") or "insight"
 	TargetID       string
 	Before, After  json.RawMessage // the target before and after; nil when it did not exist
 	Rationale      string

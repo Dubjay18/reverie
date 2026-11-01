@@ -350,7 +350,7 @@ func dreamCmd(ctx context.Context, args []string) error {
 		pos = pos[1:]
 	}
 
-	eng, err := openEngine(*db, llmOpts()...)
+	eng, err := openEngine(*db, append(llmOpts(), recombineOpts()...)...)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 // Package mcp serves Reverie over the Model Context Protocol on stdio
 // (newline-delimited JSON-RPC 2.0). It is hand-written to avoid a dependency:
-// the surface is initialize, ping, tools/list and tools/call.
+// the surface is initialize, ping, tools/list, tools/call, resources/list and
+// resources/read.
 package mcp
 
 import (
@@ -14,7 +15,19 @@ import (
 	"sync"
 
 	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/internal/skills"
+	"github.com/Dubjay18/reverie/internal/store"
 )
+
+// PackURI is the resource a client can preload: the pack for the current
+// scope with no task, i.e. what is pinned, contested and recent.
+const PackURI = "memory://pack/current"
+
+// SkillReporter is the optional part of Mem that takes skill outcomes. When
+// Mem implements it, the memory_skill_outcome tool is offered.
+type SkillReporter interface {
+	SkillOutcome(ctx context.Context, s reverie.Scope, ref string, success bool) (store.Skill, skills.Transition, error)
+}
 
 var supported = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
@@ -148,13 +161,46 @@ func (s *Server) handle(ctx context.Context, req request) response {
 		}
 		resp.Result = map[string]any{
 			"protocolVersion": ver,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"capabilities":    map[string]any{"tools": map[string]any{}, "resources": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "reverie", "version": s.Version},
 		}
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": tools}
+		list := tools
+		if _, ok := s.Mem.(SkillReporter); ok {
+			list = append(append([]map[string]any(nil), tools...), skillOutcomeTool)
+		}
+		resp.Result = map[string]any{"tools": list}
+	case "resources/list":
+		resp.Result = map[string]any{"resources": []map[string]any{{
+			"uri":         PackURI,
+			"name":        "Current memory pack",
+			"description": "What Reverie would recall for this scope with no task: pinned and contested facts, recent episodes and active skills.",
+			"mimeType":    "text/markdown",
+		}}}
+	case "resources/read":
+		var p struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = &rpcError{-32602, "invalid params"}
+			return resp
+		}
+		if p.URI != PackURI {
+			resp.Error = &rpcError{-32002, "resource not found: " + p.URI}
+			return resp
+		}
+		pack, err := s.Mem.Recall(ctx, s.Scope, "", defaultBudget)
+		if err != nil {
+			resp.Error = &rpcError{-32603, err.Error()}
+			return resp
+		}
+		text := pack.Render()
+		if text == "" {
+			text = "No relevant memory yet."
+		}
+		resp.Result = map[string]any{"contents": []map[string]any{{"uri": PackURI, "mimeType": "text/markdown", "text": text}}}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -225,6 +271,15 @@ var tools = []map[string]any{
 			"ref": prop("string", "The ref from a memory_recall citation."),
 		}, "ref"),
 	},
+}
+
+var skillOutcomeTool = map[string]any{
+	"name":        "memory_skill_outcome",
+	"description": "Report whether a recalled skill worked, using its ref (skill:<id>@v<n>). A proposed method becomes a skill after enough successful uses; a skill that keeps failing is withdrawn.",
+	"inputSchema": schema(map[string]any{
+		"ref":     prop("string", "The skill ref from a memory_recall citation, e.g. skill:deploy@v2."),
+		"success": prop("boolean", "true if following the skill worked."),
+	}, "ref", "success"),
 }
 
 func prop(typ, desc string) map[string]any { return map[string]any{"type": typ, "description": desc} }
@@ -347,6 +402,34 @@ func (s *Server) call(ctx context.Context, name string, args json.RawMessage) (s
 			return "", err
 		}
 		return formatEvents(events), nil
+
+	case "memory_skill_outcome":
+		rep, ok := s.Mem.(SkillReporter)
+		if !ok {
+			break
+		}
+		var a struct {
+			Ref     string `json:"ref"`
+			Success *bool  `json:"success"`
+		}
+		if err := decode(args, &a); err != nil {
+			return "", err
+		}
+		if a.Success == nil {
+			return "", errors.New("success is required")
+		}
+		sk, tr, err := rep.SkillOutcome(ctx, s.Scope, a.Ref, *a.Success)
+		if err != nil {
+			return "", err
+		}
+		msg := fmt.Sprintf("recorded for %s: %d/%d successful, rate %.2f, %s", skills.Ref(sk), sk.Successes, sk.Uses, skills.Rate(sk), sk.Status)
+		switch tr {
+		case skills.Promoted:
+			msg += " (promoted to an active skill)"
+		case skills.Deprecate:
+			msg += " (deprecated: it fails too often)"
+		}
+		return msg, nil
 	}
 	return "", fmt.Errorf("%w: %s", errUnknownTool, name)
 }

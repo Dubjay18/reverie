@@ -12,6 +12,7 @@ import (
 	"github.com/Dubjay18/reverie/internal/guard"
 	"github.com/Dubjay18/reverie/internal/llm"
 	"github.com/Dubjay18/reverie/internal/ontology"
+	"github.com/Dubjay18/reverie/internal/skills"
 	"github.com/Dubjay18/reverie/internal/store"
 	"github.com/Dubjay18/reverie/internal/telemetry"
 )
@@ -26,37 +27,48 @@ var (
 
 // Report summarises what a dream run did. It is stored as JSON on dream_runs.report.
 type Report struct {
-	RunID        string   `json:"run_id"`
-	Trigger      string   `json:"trigger"`
-	Status       string   `json:"status"`
-	Episodes     int      `json:"episodes"`
-	EpisodeIDs   []string `json:"episode_ids,omitempty"`
-	Learned      int      `json:"learned"`
-	Merged       int      `json:"merged"`
-	Superseded   int      `json:"superseded"`
-	Contested    int      `json:"contested"`
-	Forgotten    int      `json:"forgotten"`
-	Rejected     int      `json:"rejected"`
-	TokensSpent  int      `json:"tokens_spent"`
-	TokensBudget int      `json:"tokens_budget"`
-	Skipped      []string `json:"skipped,omitempty"`
+	RunID      string   `json:"run_id"`
+	Trigger    string   `json:"trigger"`
+	Status     string   `json:"status"`
+	Episodes   int      `json:"episodes"`
+	EpisodeIDs []string `json:"episode_ids,omitempty"`
+	Learned    int      `json:"learned"`
+	Merged     int      `json:"merged"`
+	Superseded int      `json:"superseded"`
+	Contested  int      `json:"contested"`
+	Forgotten  int      `json:"forgotten"`
+	Rejected   int      `json:"rejected"`
+	// Procedural memory (v1.1).
+	SkillsProposed    int      `json:"skills_proposed,omitempty"`
+	InsightsProposed  int      `json:"insights_proposed,omitempty"`
+	InsightsConfirmed int      `json:"insights_confirmed,omitempty"`
+	TokensSpent       int      `json:"tokens_spent"`
+	TokensBudget      int      `json:"tokens_budget"`
+	Skipped           []string `json:"skipped,omitempty"`
 }
 
 func (r Report) Summary() string {
-	return fmt.Sprintf("dream %s (%s): consolidated %d episode(s), learned %d fact(s), merged %d, superseded %d, contested %d, rejected %d (tokens %d/%d)",
+	s := fmt.Sprintf("dream %s (%s): consolidated %d episode(s), learned %d fact(s), merged %d, superseded %d, contested %d, rejected %d (tokens %d/%d)",
 		r.RunID, r.Trigger, r.Episodes, r.Learned, r.Merged, r.Superseded, r.Contested, r.Rejected, r.TokensSpent, r.TokensBudget)
+	if r.SkillsProposed+r.InsightsProposed+r.InsightsConfirmed > 0 {
+		s += fmt.Sprintf("; proposed %d skill(s), drew %d insight(s), confirmed %d", r.SkillsProposed, r.InsightsProposed, r.InsightsConfirmed)
+	}
+	return s
 }
 
 // Config configures a single dream run.
 type Config struct {
-	Trigger    string // manual | pressure | idle | hook | cron
-	Budget     int    // token cap; default DefaultDreamBudget
-	LeaseTTL   time.Duration
-	Now        time.Time
-	LLM        llm.LLM
-	Ontology   *ontology.Ontology
-	Tracer     *telemetry.Tracer
-	Phases     []Phase                 // optional override; defaults to Replay -> Distill -> ReconcileReflect
+	Trigger  string // manual | pressure | idle | hook | cron
+	Budget   int    // token cap; default DefaultDreamBudget
+	LeaseTTL time.Duration
+	Now      time.Time
+	LLM      llm.LLM
+	Ontology *ontology.Ontology
+	Tracer   *telemetry.Tracer
+	// Recombine adds the Recombine phase (speculative insights). It is off by
+	// default: insights ship behind eval evidence (PRD M6).
+	Recombine  bool
+	Phases     []Phase                 // optional override; defaults to Replay -> Distill -> ReconcileReflect -> Synthesize [-> Recombine] -> Forget
 	BeforeSave func(tx store.Tx) error // test hook to inject mid-commit failure
 }
 
@@ -159,8 +171,12 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 			ReplayPhase{},
 			DistillPhase{LLM: model, Ontology: onto},
 			ReconcileReflectPhase{Ontology: onto},
-			ForgetPhase{Ontology: onto},
+			SynthesizePhase{},
 		}
+		if cfg.Recombine {
+			phases = append(phases, RecombinePhase{LLM: model})
+		}
+		phases = append(phases, ForgetPhase{Ontology: onto})
 	}
 	view := NewReadView(sc)
 	renewLease := func() error {
@@ -280,6 +296,10 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 			}
 		}
 
+		if err := commitProcedural(ctx, tx, st, runID, now, &rep); err != nil {
+			return err
+		}
+
 		// Mark replayed episodes consolidated and journal the change so RevertRun
 		// (and reverting that revert) restores both facts and episodes.
 		for _, cl := range st.Clusters {
@@ -355,4 +375,93 @@ func Run(ctx context.Context, sc store.Scoped, cfg Config) (Report, error) {
 	runSpan.SetAttr("rejected", rep.Rejected)
 	runSpan.SetAttr("tokens_spent", rep.TokensSpent)
 	return rep, nil
+}
+
+// commitProcedural runs the Validate gate over skill drafts, insights and
+// insight confirmations and writes the accepted ones with their journal rows,
+// inside the dream's commit transaction.
+func commitProcedural(ctx context.Context, tx store.Tx, st *State, runID string, now time.Time, rep *Report) error {
+	for _, sp := range st.Skills {
+		sk, err := guard.ValidateSkill(sp.Skill, st.EpisodeOrigins)
+		if err != nil {
+			rep.Rejected++
+			continue
+		}
+		// The version must still be the next one; nothing may be overwritten.
+		latest, err := tx.Skills().Get(ctx, sk.ID, 0)
+		switch {
+		case err == nil && latest.Version >= sk.Version:
+			rep.Rejected++
+			continue
+		case err != nil && !errors.Is(err, store.ErrNotFound):
+			return err
+		}
+		if err := skills.SaveCandidate(ctx, tx, sk, runID, "synthesize", sp.Rationale, now); err != nil {
+			if errors.Is(err, store.ErrScopeMismatch) {
+				rep.Rejected++
+				continue
+			}
+			return err
+		}
+		rep.SkillsProposed++
+	}
+	for _, ip := range st.Insights {
+		in, err := guard.ValidateInsight(ip.Insight, st.EpisodeOrigins)
+		if err != nil {
+			rep.Rejected++
+			continue
+		}
+		if _, err := tx.Insights().Get(ctx, in.ID); err == nil {
+			rep.Rejected++
+			continue
+		}
+		if err := saveInsight(ctx, tx, nil, in, runID, "recombine", "create", ip.Rationale, ip.Tokens, now); err != nil {
+			return err
+		}
+		rep.InsightsProposed++
+	}
+	for _, c := range st.Confirmations {
+		cur, err := tx.Insights().Get(ctx, c.InsightID)
+		if err != nil {
+			rep.Rejected++
+			continue
+		}
+		if err := guard.ValidateInsightConfirmation(cur, c.EpisodeID, st.EpisodeOrigins); err != nil {
+			rep.Rejected++
+			continue
+		}
+		next := cur
+		next.Status = store.InsightConfirmed
+		next.ConfirmedBy = append(append([]string(nil), cur.ConfirmedBy...), c.EpisodeID)
+		next.ConfirmedAt = now
+		if err := saveInsight(ctx, tx, &cur, next, runID, "recombine", "confirm", "confirmed by later episode "+c.EpisodeID, 0, now); err != nil {
+			return err
+		}
+		rep.InsightsConfirmed++
+	}
+	return nil
+}
+
+// saveInsight writes an insight and its journal row. Insights live in their
+// own table: nothing here, or anywhere else, turns one into a fact.
+func saveInsight(ctx context.Context, tx store.Tx, before *store.Insight, after store.Insight, runID, phase, op, why string, tokens int, now time.Time) error {
+	e := store.JournalEntry{RunID: runID, Phase: phase, Op: op, TargetKind: facts.KindInsight, TargetID: after.ID,
+		Rationale: why, SourceEpisodes: after.EpisodeIDs, Tokens: tokens, At: now}
+	if before != nil {
+		b, err := json.Marshal(before)
+		if err != nil {
+			return err
+		}
+		e.Before = b
+	}
+	a, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
+	e.After = a
+	if err := tx.Insights().Save(ctx, after); err != nil {
+		return err
+	}
+	_, err = tx.Journal().Append(ctx, e)
+	return err
 }

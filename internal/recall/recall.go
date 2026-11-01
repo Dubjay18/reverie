@@ -108,6 +108,12 @@ func gather(ctx context.Context, tx store.Tx, q Query, now time.Time) (map[strin
 	if err := gatherFacts(ctx, tx, q, now, rel, out); err != nil {
 		return nil, err
 	}
+	if err := gatherSkills(ctx, tx, q, out); err != nil {
+		return nil, err
+	}
+	if err := gatherInsights(ctx, tx, q, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

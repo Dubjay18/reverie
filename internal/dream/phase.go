@@ -16,6 +16,10 @@ type ReadView interface {
 	Events(ctx context.Context, q store.EventQuery) ([]reverie.Event, error)
 	LiveFacts(ctx context.Context, entity, relation string) ([]reverie.Fact, error)
 	QueryFacts(ctx context.Context, q store.FactQuery) ([]reverie.Fact, error)
+	// Recent returns closed episodes, newest first (consolidated or not).
+	Recent(ctx context.Context, limit int) ([]store.Episode, error)
+	SkillVersions(ctx context.Context, id string) ([]store.Skill, error)
+	Insights(ctx context.Context, q store.InsightQuery) ([]store.Insight, error)
 }
 
 type txReadView struct {
@@ -58,6 +62,30 @@ func (v txReadView) QueryFacts(ctx context.Context, q store.FactQuery) (out []re
 	return out, err
 }
 
+func (v txReadView) Recent(ctx context.Context, limit int) (out []store.Episode, err error) {
+	err = v.sc.View(ctx, func(tx store.Tx) (err error) {
+		out, err = tx.Episodes().Recent(ctx, limit)
+		return err
+	})
+	return out, err
+}
+
+func (v txReadView) SkillVersions(ctx context.Context, id string) (out []store.Skill, err error) {
+	err = v.sc.View(ctx, func(tx store.Tx) (err error) {
+		out, err = tx.Skills().Versions(ctx, id)
+		return err
+	})
+	return out, err
+}
+
+func (v txReadView) Insights(ctx context.Context, q store.InsightQuery) (out []store.Insight, err error) {
+	err = v.sc.View(ctx, func(tx store.Tx) (err error) {
+		out, err = tx.Insights().List(ctx, q)
+		return err
+	})
+	return out, err
+}
+
 // Proposal is a candidate fact mutation produced by a Phase before Validate
 // and Commit.
 type Proposal struct {
@@ -84,7 +112,29 @@ type State struct {
 	Clusters       []Cluster
 	EpisodeOrigins map[string][]reverie.Origin // taskID -> origins in that episode
 	Proposals      []Proposal
+	Skills         []SkillProposal   // candidate skills from Synthesize
+	Insights       []InsightProposal // speculative insights from Recombine
+	Confirmations  []Confirmation    // later episodes that confirm a speculative insight
 	SkippedPhases  []string
+}
+
+// SkillProposal is a candidate skill version drafted by Synthesize.
+type SkillProposal struct {
+	Skill     store.Skill
+	Rationale string
+}
+
+// InsightProposal is a speculative insight drawn by Recombine.
+type InsightProposal struct {
+	Insight   store.Insight
+	Rationale string
+	Tokens    int
+}
+
+// Confirmation says a later episode bears out a speculative insight.
+type Confirmation struct {
+	InsightID string
+	EpisodeID string
 }
 
 // Phase is one step of a dream run. It receives a ReadView (never a store.Tx)

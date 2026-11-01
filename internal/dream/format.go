@@ -11,8 +11,12 @@ import (
 
 // FormatSummary formats the one-line summary printed by `reverie dream`.
 func FormatSummary(rep Report) string {
-	return fmt.Sprintf("dream %s: consolidated %d episode(s), learned %d fact(s), superseded %d, merged %d, contested %d, rejected %d (tokens %d/%d)",
+	s := fmt.Sprintf("dream %s: consolidated %d episode(s), learned %d fact(s), superseded %d, merged %d, contested %d, rejected %d (tokens %d/%d)",
 		rep.RunID, rep.Episodes, rep.Learned, rep.Superseded, rep.Merged, rep.Contested, rep.Rejected, rep.TokensSpent, rep.TokensBudget)
+	if rep.SkillsProposed+rep.InsightsProposed+rep.InsightsConfirmed > 0 {
+		s += fmt.Sprintf("; proposed %d skill(s), drew %d insight(s), confirmed %d", rep.SkillsProposed, rep.InsightsProposed, rep.InsightsConfirmed)
+	}
+	return s
 }
 
 // FormatDiff renders a human-readable diff of a dream run and its journal entries.
@@ -45,6 +49,26 @@ func FormatDiff(run store.DreamRun, entries []store.JournalEntry) string {
 				rev = " [reverted]"
 			}
 			fmt.Fprintf(&b, "  ~ [%s] episode:%s%s\n", e.Op, e.TargetID, rev)
+			continue
+		}
+		if e.TargetKind == "skill" {
+			var sk store.Skill
+			_ = json.Unmarshal(e.After, &sk)
+			rev := ""
+			if e.Reverted {
+				rev = " [reverted]"
+			}
+			fmt.Fprintf(&b, "  + [%s] skill:%s %s: %s (%s)%s\n", e.Op, e.TargetID, sk.Name, strings.Join(sk.Steps, " -> "), sk.Status, rev)
+			continue
+		}
+		if e.TargetKind == "insight" {
+			var in store.Insight
+			_ = json.Unmarshal(e.After, &in)
+			rev := ""
+			if e.Reverted {
+				rev = " [reverted]"
+			}
+			fmt.Fprintf(&b, "  + [%s] insight:%s %q (%s, %.2f)%s\n", e.Op, e.TargetID, in.Body, in.Status, in.Confidence, rev)
 			continue
 		}
 		var before, after reverie.Fact

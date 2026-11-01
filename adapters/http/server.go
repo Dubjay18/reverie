@@ -71,6 +71,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRevert(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/facts":
 		s.handleFacts(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/journal":
+		s.handleJournalJSON(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/journal":
+		s.handleJournalPage(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/skills/outcome":
+		s.handleSkillOutcome(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, errors.New("not found"))
 	}

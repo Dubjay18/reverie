@@ -71,7 +71,18 @@ func (s *Store) Close() error {
 func (s *Store) For(sc reverie.Scope) store.Scoped { return &scoped{s: s, sc: sc} }
 
 func (s *Store) Scopes(ctx context.Context) ([]reverie.Scope, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT tenant, agent, project, usr FROM events ORDER BY 1, 2, 3, 4`)
+	// Row-level security hides every scoped row unless the transaction names
+	// a scope; this maintenance read is the one place that asks for the list
+	// of scopes instead, and it can only read events (see rlsStatements).
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('reverie.list_scopes', 'on', true)`); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT tenant, agent, project, usr FROM events ORDER BY 1, 2, 3, 4`)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +122,13 @@ func (s *scoped) run(ctx context.Context, readOnly bool, fn func(store.Tx) error
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Name the scope for row-level security, transaction-local so a pooled
+	// connection never carries it into the next transaction.
+	if _, err := tx.Exec(ctx, `SELECT set_config('reverie.tenant', $1, true), set_config('reverie.agent', $2, true),
+		set_config('reverie.project', $3, true), set_config('reverie.usr', $4, true)`,
+		s.sc.Tenant, s.sc.Agent, s.sc.Project, s.sc.User); err != nil {
+		return err
+	}
 	if err := fn(&txn{tx: tx, sc: s.sc, dims: s.s.dims, readOnly: readOnly}); err != nil {
 		return err
 	}
@@ -272,12 +290,94 @@ func (s *Store) migrate(ctx context.Context) error {
     expires_at TEXT NOT NULL,
     PRIMARY KEY (tenant, agent, project, usr)
 )`,
+		`CREATE TABLE IF NOT EXISTS skills (
+    tenant      TEXT NOT NULL,
+    project     TEXT NOT NULL,
+    id          TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    agent       TEXT NOT NULL DEFAULT '',
+    name        TEXT NOT NULL,
+    trigger     TEXT NOT NULL DEFAULT '',
+    steps       TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    successes   INTEGER NOT NULL DEFAULT 0,
+    episode_ids TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    last_used   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant, project, id, version)
+)`,
+		`CREATE INDEX IF NOT EXISTS skills_status ON skills (tenant, project, status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS insights (
+    tenant       TEXT NOT NULL,
+    agent        TEXT NOT NULL,
+    project      TEXT NOT NULL,
+    usr          TEXT NOT NULL,
+    id           TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    entities     TEXT NOT NULL DEFAULT '[]',
+    confidence   DOUBLE PRECISION NOT NULL,
+    status       TEXT NOT NULL,
+    episode_ids  TEXT NOT NULL DEFAULT '[]',
+    confirmed_by TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant, agent, project, usr, id)
+)`,
+		`CREATE INDEX IF NOT EXISTS insights_status ON insights (tenant, agent, project, usr, status, created_at)`,
 	} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("postgres: migrate #%d: %w", i, err)
 		}
 	}
+	for i, q := range rlsStatements() {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("postgres: migrate rls #%d: %w", i, err)
+		}
+	}
 	return nil
+}
+
+// Row-level security is defence in depth behind the Go scoping: every query
+// already filters by scope, and RLS makes a query that forgot to see nothing.
+// Each transaction names its scope with set_config (scoped.run). FORCE makes
+// the policies apply to the table owner too, which is usually the role the
+// store connects as; only a superuser or a BYPASSRLS role skips them.
+var scopedTables = []string{"events", "episodes", "items", "facts", "fact_sources", "journal", "dream_runs", "dream_leases", "insights"}
+
+const scopeMatch = `tenant = current_setting('reverie.tenant', true) AND agent = current_setting('reverie.agent', true)
+    AND project = current_setting('reverie.project', true) AND usr = current_setting('reverie.usr', true)`
+
+// Skills belong to (tenant, project): shared ones, or ones narrowed to the agent.
+const skillMatch = `tenant = current_setting('reverie.tenant', true) AND project = current_setting('reverie.project', true)
+    AND agent IN ('', current_setting('reverie.agent', true))`
+
+func createPolicy(table, name, body string) string {
+	// CREATE POLICY has no IF NOT EXISTS; check pg_policies in this schema.
+	return `DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = '` + table + `' AND policyname = '` + name + `') THEN
+    CREATE POLICY ` + name + ` ON ` + table + ` ` + body + `;
+  END IF;
+END $$`
+}
+
+func rlsStatements() []string {
+	var out []string
+	add := func(table, match string) {
+		out = append(out,
+			`ALTER TABLE `+table+` ENABLE ROW LEVEL SECURITY`,
+			`ALTER TABLE `+table+` FORCE ROW LEVEL SECURITY`,
+			createPolicy(table, "reverie_scope", `USING (`+match+`) WITH CHECK (`+match+`)`))
+	}
+	for _, t := range scopedTables {
+		add(t, scopeMatch)
+	}
+	add("skills", skillMatch)
+	// Store.Scopes lists scopes for maintenance: read-only, events only.
+	out = append(out, createPolicy("events", "reverie_list_scopes",
+		`FOR SELECT USING (current_setting('reverie.list_scopes', true) = 'on')`))
+	return out
 }
 
 func (s *Store) checkMeta(ctx context.Context, cfg Config) error {

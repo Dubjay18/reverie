@@ -35,6 +35,7 @@ type Engine struct {
 	embedTimeout time.Duration // bound on the per-query embedding call in Recall
 	onto         *ontology.Ontology
 	tracer       *telemetry.Tracer
+	recombine    bool
 	kick         chan struct{}
 	stop         context.CancelFunc
 	done         chan struct{}
@@ -63,6 +64,10 @@ func WithClock(now func() time.Time) Option {
 		}
 	}
 }
+
+// WithRecombine turns on the Recombine dream phase, which draws speculative
+// insights. It is off by default until evals justify it.
+func WithRecombine(on bool) Option { return func(g *Engine) { g.recombine = on } }
 
 // WithTracer attaches a telemetry Tracer for spans and token metering.
 func WithTracer(t *telemetry.Tracer) Option { return func(g *Engine) { g.tracer = t } }
@@ -693,12 +698,13 @@ func (e *Engine) Scrub(ctx context.Context) (ScrubReport, error) {
 // token budget (0 uses the default budget).
 func (e *Engine) Dream(ctx context.Context, s reverie.Scope, trigger string, budget int) (dream.Report, error) {
 	return dream.Run(ctx, e.st.For(s), dream.Config{
-		Trigger:  trigger,
-		Budget:   budget,
-		Now:      e.now().UTC(),
-		LLM:      e.model,
-		Ontology: e.onto,
-		Tracer:   e.tracer,
+		Trigger:   trigger,
+		Budget:    budget,
+		Now:       e.now().UTC(),
+		LLM:       e.model,
+		Ontology:  e.onto,
+		Tracer:    e.tracer,
+		Recombine: e.recombine,
 	})
 }
 

@@ -47,6 +47,10 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("unconsolidated returns closed unconsolidated by importance", func(t *testing.T) { unconsolidatedEpisodes(t, open(t)) })
 	t.Run("dream runs and lease lifecycle", func(t *testing.T) { dreamRunsAndLease(t, open(t)) })
 	t.Run("scopes lists scopes with data", func(t *testing.T) { scopes(t, open(t)) })
+	t.Run("skills roundtrip versions and list", func(t *testing.T) { skillsRoundtrip(t, open(t)) })
+	t.Run("skills are project scoped with agent narrowing", func(t *testing.T) { skillsScope(t, open(t)) })
+	t.Run("insights roundtrip and are scoped", func(t *testing.T) { insightsRoundtrip(t, open(t)) })
+	t.Run("skill and insight writes fail through a view", func(t *testing.T) { proceduralViewReadOnly(t, open(t)) })
 }
 
 func tx(t *testing.T, s store.Store, sc reverie.Scope, fn func(store.Tx) error) error {

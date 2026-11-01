@@ -81,7 +81,7 @@ func TestHandshakeAndToolList(t *testing.T) {
 	for _, tl := range list {
 		names = append(names, tl.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "memory_recall,memory_record,memory_remember,memory_forget,memory_expand" {
+	if strings.Join(names, ",") != "memory_recall,memory_record,memory_remember,memory_forget,memory_expand,memory_skill_outcome" {
 		t.Fatalf("tools: %v", names)
 	}
 	if s.rpc("ping", nil)["result"] == nil {

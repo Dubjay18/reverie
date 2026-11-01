@@ -225,6 +225,17 @@ func RevertRun(ctx context.Context, tx store.Tx, runID string, now time.Time) (i
 			undone++
 			continue
 		}
+		if e.TargetKind == KindSkill || e.TargetKind == KindInsight {
+			revert := revertSkill
+			if e.TargetKind == KindInsight {
+				revert = revertInsight
+			}
+			if err := revert(ctx, tx, runID, e, now); err != nil {
+				return undone, err
+			}
+			undone++
+			continue
+		}
 		if e.TargetKind != KindFact {
 			continue
 		}
@@ -281,6 +292,11 @@ func unmarkDreamEpisodes(ctx context.Context, tx store.Tx, runID string, entries
 	}
 	seen := map[string]bool{}
 	for _, e := range entries {
+		// Skills and insights cite episodes they only read (skills look back
+		// past this run); those episodes were not consolidated by it.
+		if e.TargetKind == KindSkill || e.TargetKind == KindInsight {
+			continue
+		}
 		for _, epID := range e.SourceEpisodes {
 			seen[epID] = true
 		}

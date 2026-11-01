@@ -143,6 +143,38 @@
           "200": { "description": "Matching facts" }
         }
       }
+    },
+    "/v1/journal": {
+      "get": {
+        "operationId": "journal",
+        "summary": "Dream runs and journal entries for a scope, newest first (read-only); query: tenant, agent, project, user, limit",
+        "responses": {
+          "200": { "description": "{runs, entries}" }
+        }
+      }
+    },
+    "/journal": {
+      "get": {
+        "operationId": "journalPage",
+        "summary": "Read-only HTML journal page; same query as /v1/journal",
+        "responses": {
+          "200": { "description": "HTML page", "content": { "text/html": {} } }
+        }
+      }
+    },
+    "/v1/skills/outcome": {
+      "post": {
+        "operationId": "skillOutcome",
+        "summary": "Report whether a recalled skill worked; applies the promotion and deprecation gate",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SkillOutcomeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "{skill, rate, transition}" },
+          "404": { "description": "No such skill" }
+        }
+      }
     }
   },
   "components": {
@@ -237,6 +269,15 @@
         "properties": {
           "scope": { "$ref": "#/components/schemas/Scope" },
           "run_id": { "type": "string" }
+        }
+      },
+      "SkillOutcomeRequest": {
+        "type": "object",
+        "required": ["ref", "success"],
+        "properties": {
+          "scope": { "$ref": "#/components/schemas/Scope" },
+          "ref": { "type": "string", "description": "skill:<id>@v<n> from a recall citation" },
+          "success": { "type": "boolean" }
         }
       }
     }
