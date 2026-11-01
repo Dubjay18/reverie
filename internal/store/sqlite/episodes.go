@@ -58,6 +58,14 @@ func (r episodeRepo) Recent(ctx context.Context, limit int) ([]store.Episode, er
 	return r.list(ctx, `closed = 1 ORDER BY ended_at DESC, task_id LIMIT ?`, limit)
 }
 
+func (r episodeRepo) Unconsolidated(ctx context.Context, limit int) ([]store.Episode, error) {
+	if limit <= 0 {
+		limit = store.DefaultLimit
+	}
+	limit = min(limit, store.MaxLimit)
+	return r.list(ctx, `closed = 1 AND consolidated = 0 ORDER BY importance DESC, ended_at DESC, task_id LIMIT ?`, limit)
+}
+
 func (r episodeRepo) list(ctx context.Context, tail string, limit int) ([]store.Episode, error) {
 	sc := r.t.sc
 	args := []any{sc.Tenant, sc.Agent, sc.Project, sc.User}

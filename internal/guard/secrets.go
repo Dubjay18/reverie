@@ -37,6 +37,8 @@ var rules = []rule{
 	// key = unquoted value: redact to the end of the line, since a value like
 	// "correct horse battery staple" has spaces and a shell command may follow
 	{regexp.MustCompile(`(?i)(pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth)(\s*[:=]\s*)[^\s"'\\;,&][^"'\\\n]{3,}`), "${1}${2}" + Redacted},
+	// prose credential statement: "password is ..." / "api key is ..."
+	{regexp.MustCompile(`(?i)\b(pass(?:word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key)(\s+is\s+)[^\s"'\\;,&][^"'\\\n]{3,}`), "${1}${2}" + Redacted},
 }
 
 // Redact replaces anything that looks like a credential with [REDACTED]. It

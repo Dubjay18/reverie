@@ -288,3 +288,21 @@ func TestHookPackOmitsUncontestedAgentFactsAndNeverPrintsUnquotedInstructions(t 
 		t.Fatalf("user_stated note containing 'agent stated]' was dropped:\n%s", out)
 	}
 }
+
+func TestStopHookTriggersDreamOnUnconsolidatedEpisodes(t *testing.T) {
+	ctx := context.Background()
+	e, _ := engine.Open(t.TempDir() + "/r.db")
+	defer e.Close()
+	handle(t, e, `{"session_id":"s-stop","cwd":"/w/app","hook_event_name":"UserPromptSubmit","prompt":"deploy the service"}`)
+	handle(t, e, `{"session_id":"s-stop","cwd":"/w/app","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"make deploy"},"error":"exit status 2"}`)
+	handle(t, e, `{"session_id":"s-stop","cwd":"/w/app","hook_event_name":"SessionEnd","reason":"other"}`)
+	handle(t, e, `{"session_id":"s-stop","cwd":"/w/app","hook_event_name":"Stop"}`)
+	sc := reverie.Scope{Tenant: "local", Agent: "claude-code", Project: "/w/app", User: "jay"}
+	runs, err := e.DreamRuns(ctx, sc, 10)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("expected Stop hook to trigger a dream run, got runs=%v err=%v", runs, err)
+	}
+	if runs[0].Trigger != "hook" {
+		t.Fatalf("want trigger=hook, got %q", runs[0].Trigger)
+	}
+}

@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/internal/dream"
 	"github.com/Dubjay18/reverie/internal/embed"
 	"github.com/Dubjay18/reverie/internal/episodes"
 	"github.com/Dubjay18/reverie/internal/facts"
 	"github.com/Dubjay18/reverie/internal/guard"
+	"github.com/Dubjay18/reverie/internal/llm"
 	"github.com/Dubjay18/reverie/internal/ontology"
 	"github.com/Dubjay18/reverie/internal/recall"
 	"github.com/Dubjay18/reverie/internal/store"
@@ -27,6 +29,7 @@ type Engine struct {
 	st           store.Store
 	now          func() time.Time
 	emb          embed.Embedder
+	model        llm.LLM
 	tok          recall.Tokenizer
 	embedTimeout time.Duration // bound on the per-query embedding call in Recall
 	onto         *ontology.Ontology
@@ -46,6 +49,9 @@ func WithTokenizer(t recall.Tokenizer) Option { return func(g *Engine) { g.tok =
 
 // WithOntology replaces the built-in ontology (see internal/ontology).
 func WithOntology(o *ontology.Ontology) Option { return func(g *Engine) { g.onto = o } }
+
+// WithLLM configures the language model used by the Distill dream phase.
+func WithLLM(m llm.LLM) Option { return func(g *Engine) { g.model = m } }
 
 // Open returns a Memory backed by a SQLite file.
 func Open(path string, opts ...Option) (*Engine, error) {
@@ -635,4 +641,71 @@ func (e *Engine) Scrub(ctx context.Context) (ScrubReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// Dream runs one dream consolidation pass for s with the given trigger and
+// token budget (0 uses the default budget).
+func (e *Engine) Dream(ctx context.Context, s reverie.Scope, trigger string, budget int) (dream.Report, error) {
+	return dream.Run(ctx, e.st.For(s), dream.Config{
+		Trigger:  trigger,
+		Budget:   budget,
+		Now:      e.now().UTC(),
+		LLM:      e.model,
+		Ontology: e.onto,
+	})
+}
+
+// DreamIfNeeded checks whether any automatic trigger (pressure, idle, cron) is
+// due for s at the engine's current clock, and runs a dream when one is.
+func (e *Engine) DreamIfNeeded(ctx context.Context, s reverie.Scope, pol dream.TriggerPolicy, budget int) (dream.Report, bool, error) {
+	trig, err := dream.ShouldTrigger(ctx, e.st.For(s), pol, e.now().UTC())
+	if err != nil || trig == "" {
+		return dream.Report{}, false, err
+	}
+	rep, err := e.Dream(ctx, s, trig, budget)
+	if errors.Is(err, dream.ErrLeaseBusy) {
+		return dream.Report{}, false, nil
+	}
+	return rep, err == nil, err
+}
+
+// DreamShow returns a DreamRun and its journal entries for `reverie dream show <run>`.
+func (e *Engine) DreamShow(ctx context.Context, s reverie.Scope, runID string) (run store.DreamRun, entries []store.JournalEntry, err error) {
+	err = e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
+		run, err = tx.Dreams().GetRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		entries, err = tx.Journal().ByRun(ctx, runID)
+		return err
+	})
+	return run, entries, err
+}
+
+// DreamRuns lists recent dream runs for s, newest first.
+func (e *Engine) DreamRuns(ctx context.Context, s reverie.Scope, limit int) (out []store.DreamRun, err error) {
+	err = e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
+		out, err = tx.Dreams().Runs(ctx, limit)
+		return err
+	})
+	return out, err
+}
+
+// TriggerStopDream runs a dream triggered by `hook stop` when there is at
+// least one unconsolidated closed episode in s. A busy lease is ignored.
+func (e *Engine) TriggerStopDream(ctx context.Context, s reverie.Scope) error {
+	var hasWork bool
+	_ = e.st.For(s).View(ctx, func(tx store.Tx) error {
+		u, err := tx.Episodes().Unconsolidated(ctx, 1)
+		hasWork = err == nil && len(u) > 0
+		return nil
+	})
+	if !hasWork {
+		return nil
+	}
+	_, err := e.Dream(ctx, s, dream.TriggerHook, 0)
+	if errors.Is(err, dream.ErrLeaseBusy) {
+		return nil
+	}
+	return err
 }

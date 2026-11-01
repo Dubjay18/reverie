@@ -44,6 +44,7 @@ type Tx interface {
 	Index() IndexRepo
 	Facts() FactRepo
 	Journal() JournalRepo
+	Dreams() DreamRepo
 }
 
 type EventRepo interface {
@@ -78,6 +79,9 @@ type EpisodeRepo interface {
 	Open(ctx context.Context) ([]Episode, error)
 	// Recent returns closed episodes, newest first.
 	Recent(ctx context.Context, limit int) ([]Episode, error)
+	// Unconsolidated returns closed episodes no dream has processed yet, most
+	// important first.
+	Unconsolidated(ctx context.Context, limit int) ([]Episode, error)
 }
 
 type Outcome string
@@ -206,4 +210,40 @@ type JournalRepo interface {
 	// Recent returns the newest entries first.
 	Recent(ctx context.Context, limit int) ([]JournalEntry, error)
 	MarkReverted(ctx context.Context, id int64) error
+}
+
+// Dream run statuses.
+const (
+	RunRunning = "running"
+	RunDone    = "done"
+	RunFailed  = "failed"
+	RunAborted = "aborted" // the process died or the lease lapsed before it finished
+)
+
+type DreamRun struct {
+	ID        string
+	Trigger   string // manual | pressure | idle | cron | hook
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Budget    int // tokens allowed
+	Spent     int // tokens used
+	Report    json.RawMessage
+}
+
+// DreamRepo tracks dream runs and the per-scope lease that keeps two dreams
+// from running at once.
+type DreamRepo interface {
+	// Acquire takes the scope's lease for ttl. It reports false, with no
+	// error, when another run holds an unexpired lease. On success any run
+	// still marked running is marked aborted: if we hold the lease, nobody
+	// else is running.
+	Acquire(ctx context.Context, runID string, ttl time.Duration, now time.Time) (bool, error)
+	// Renew extends an held lease by ttl from now. Reports false when runID no longer holds the lease.
+	Renew(ctx context.Context, runID string, ttl time.Duration, now time.Time) (bool, error)
+	Release(ctx context.Context, runID string) error
+	StartRun(ctx context.Context, r DreamRun) error
+	FinishRun(ctx context.Context, r DreamRun) error
+	GetRun(ctx context.Context, id string) (DreamRun, error) // ErrNotFound if absent
+	Runs(ctx context.Context, limit int) ([]DreamRun, error) // newest first
 }

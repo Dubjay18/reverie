@@ -44,6 +44,8 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("facts are scoped", func(t *testing.T) { factsScoped(t, open(t)) })
 	t.Run("journal append get run revert", func(t *testing.T) { journalBasics(t, open(t)) })
 	t.Run("index delete removes text and vector", func(t *testing.T) { indexDelete(t, open(t)) })
+	t.Run("unconsolidated returns closed unconsolidated by importance", func(t *testing.T) { unconsolidatedEpisodes(t, open(t)) })
+	t.Run("dream runs and lease lifecycle", func(t *testing.T) { dreamRunsAndLease(t, open(t)) })
 	t.Run("scopes lists scopes with data", func(t *testing.T) { scopes(t, open(t)) })
 }
 
@@ -752,6 +754,94 @@ func updatePayload(t *testing.T, s store.Store) {
 	mustTx(t, s, variants()["user"], func(x store.Tx) error {
 		if err := x.Events().UpdatePayload(ctx, ev.ID, []byte(`{}`)); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("another scope rewrote the event: %v", err)
+		}
+		return nil
+	})
+}
+
+func unconsolidatedEpisodes(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	t0 := time.Now().UTC()
+	mustTx(t, s, base, func(x store.Tx) error {
+		for _, c := range []struct {
+			task   string
+			closed bool
+			consol bool
+			imp    float64
+		}{
+			{"low", true, false, 0.2},
+			{"high", true, false, 0.9},
+			{"done", true, true, 1.0},
+			{"open", false, false, 1.0},
+		} {
+			if err := x.Episodes().Save(ctx, store.Episode{
+				TaskID: c.task, FirstEvent: reverie.NewID(), LastEvent: reverie.NewID(),
+				StartedAt: t0, EndedAt: t0, Closed: c.closed, Consolidated: c.consol, Importance: c.imp, Tier: store.Hot,
+			}); err != nil {
+				return err
+			}
+		}
+		u, err := x.Episodes().Unconsolidated(ctx, 10)
+		if err != nil || len(u) != 2 || u[0].TaskID != "high" || u[1].TaskID != "low" {
+			t.Fatalf("unconsolidated: %+v %v", u, err)
+		}
+		return nil
+	})
+}
+
+func dreamRunsAndLease(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	mustTx(t, s, base, func(x store.Tx) error {
+		ok, err := x.Dreams().Acquire(ctx, "r1", 5*time.Minute, t0)
+		if err != nil || !ok {
+			t.Fatalf("first acquire: %v %v", ok, err)
+		}
+		if err := x.Dreams().StartRun(ctx, store.DreamRun{ID: "r1", Trigger: "manual", Status: store.RunRunning, StartedAt: t0, Budget: 1000}); err != nil {
+			return err
+		}
+		// second run before expiry is refused
+		if ok2, err := x.Dreams().Acquire(ctx, "r2", 5*time.Minute, t0.Add(time.Minute)); err != nil || ok2 {
+			t.Fatalf("second acquire while held: %v %v", ok2, err)
+		}
+		// renew by holder works; renew by non-holder returns false
+		if ok, err := x.Dreams().Renew(ctx, "r1", 10*time.Minute, t0.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("renew holder: %v %v", ok, err)
+		}
+		if ok, err := x.Dreams().Renew(ctx, "r2", 10*time.Minute, t0.Add(time.Minute)); err != nil || ok {
+			t.Fatalf("renew non-holder: %v %v", ok, err)
+		}
+		// after expiry, r2 acquires and r1 is marked aborted
+		if ok2, err := x.Dreams().Acquire(ctx, "r2", 5*time.Minute, t0.Add(20*time.Minute)); err != nil || !ok2 {
+			t.Fatalf("acquire after expiry: %v %v", ok2, err)
+		}
+		r1, err := x.Dreams().GetRun(ctx, "r1")
+		if err != nil || r1.Status != store.RunAborted {
+			t.Fatalf("stale running run should be aborted: %+v %v", r1, err)
+		}
+		if err := x.Dreams().StartRun(ctx, store.DreamRun{ID: "r2", Trigger: "pressure", Status: store.RunRunning, StartedAt: t0.Add(20 * time.Minute), Budget: 2000}); err != nil {
+			return err
+		}
+		if err := x.Dreams().FinishRun(ctx, store.DreamRun{ID: "r2", Status: store.RunDone, EndedAt: t0.Add(21 * time.Minute), Spent: 450, Report: json.RawMessage(`{"learned":2}`)}); err != nil {
+			return err
+		}
+		if err := x.Dreams().Release(ctx, "r2"); err != nil {
+			return err
+		}
+		runs, err := x.Dreams().Runs(ctx, 10)
+		if err != nil || len(runs) != 2 || runs[0].ID != "r2" || runs[0].Status != store.RunDone || runs[0].Spent != 450 {
+			t.Fatalf("runs: %+v %v", runs, err)
+		}
+		return nil
+	})
+	// another scope does not see r1 or r2 and can acquire its own lease
+	mustTx(t, s, variants()["user"], func(x store.Tx) error {
+		if _, err := x.Dreams().GetRun(ctx, "r2"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("scope leak: %v", err)
+		}
+		ok, err := x.Dreams().Acquire(ctx, "other-r", 5*time.Minute, t0)
+		if err != nil || !ok {
+			t.Fatalf("other scope acquire: %v %v", ok, err)
 		}
 		return nil
 	})

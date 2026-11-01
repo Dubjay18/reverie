@@ -11,7 +11,9 @@ import (
 	"github.com/Dubjay18/reverie/adapters/hook"
 	"github.com/Dubjay18/reverie/adapters/mcp"
 	"github.com/Dubjay18/reverie/engine"
+	"github.com/Dubjay18/reverie/internal/dream"
 	"github.com/Dubjay18/reverie/internal/embed"
+	"github.com/Dubjay18/reverie/internal/llm"
 	"github.com/Dubjay18/reverie/internal/store"
 )
 
@@ -48,6 +50,17 @@ func embedOpts() []engine.Option {
 	return nil
 }
 
+func llmOpts() []engine.Option {
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return []engine.Option{engine.WithLLM(&llm.OpenAI{
+			APIKey:  key,
+			Model:   os.Getenv("REVERIE_LLM_MODEL"),
+			BaseURL: os.Getenv("REVERIE_LLM_BASE_URL"),
+		})}
+	}
+	return nil
+}
+
 func hookCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "database file (env REVERIE_DB)")
@@ -55,12 +68,20 @@ func hookCmd(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil { // an optional event name argument is accepted and ignored
 		return err
 	}
-	eng, err := openEngine(*db)
+	eng, err := openEngine(*db, llmOpts()...)
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
 	d := hook.Defaults{Tenant: sc.Tenant, Agent: sc.Agent, User: sc.User, Project: sc.Project}
+	if fs.NArg() > 0 && fs.Arg(0) == "stop" {
+		proj := sc.Project
+		if proj == "" {
+			proj = cwdName()
+		}
+		s := reverie.Scope{Tenant: sc.Tenant, Agent: sc.Agent, Project: proj, User: sc.User}
+		return eng.TriggerStopDream(ctx, s)
+	}
 	return hook.Handle(ctx, eng, d, os.Stdin, os.Stdout)
 }
 
@@ -281,4 +302,59 @@ func scrubCmd(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("scrubbed %d event(s) and %d episode(s)\n", rep.Events, rep.Episodes)
 	return nil
+}
+
+func dreamCmd(ctx context.Context, args []string) error {
+	sub := ""
+	if len(args) > 0 && (args[0] == "show" || args[0] == "revert") {
+		sub = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("dream", flag.ExitOnError)
+	db := fs.String("db", defaultDB(), "database file (env REVERIE_DB)")
+	sc := agentScope(fs, cwdName())
+	budget := fs.Int("budget", dream.DefaultDreamBudget, "token budget for the dream run")
+	trigger := fs.String("trigger", dream.TriggerManual, "dream trigger name")
+	fs.Parse(args)
+	pos := fs.Args()
+	if sub == "" && len(pos) > 0 && (pos[0] == "show" || pos[0] == "revert") {
+		sub = pos[0]
+		pos = pos[1:]
+	}
+
+	eng, err := openEngine(*db, llmOpts()...)
+	if err != nil {
+		return err
+	}
+	defer eng.Close()
+
+	switch sub {
+	case "show":
+		if len(pos) != 1 {
+			return fmt.Errorf("usage: reverie dream show [flags] <run-id>")
+		}
+		run, entries, err := eng.DreamShow(ctx, *sc, pos[0])
+		if err != nil {
+			return err
+		}
+		fmt.Print(dream.FormatDiff(run, entries))
+		return nil
+	case "revert":
+		if len(pos) != 1 {
+			return fmt.Errorf("usage: reverie dream revert [flags] <run-id>")
+		}
+		n, err := eng.Revert(ctx, *sc, pos[0])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("reverted %d change(s) from %s\n", n, pos[0])
+		return nil
+	default:
+		rep, err := eng.Dream(ctx, *sc, *trigger, *budget)
+		if err != nil {
+			return err
+		}
+		fmt.Println(dream.FormatSummary(rep))
+		return nil
+	}
 }

@@ -27,7 +27,8 @@ var (
 )
 
 const (
-	KindFact = "fact" // the index and journal kind for facts
+	KindFact    = "fact"    // the index and journal kind for facts
+	KindEpisode = "episode" // the journal kind for episode consolidation
 )
 
 // NewRunID names a group of journal entries that are applied and reverted together.
@@ -37,7 +38,24 @@ func NewRunID(prefix string) string { return prefix + ":" + ulid.Make().String()
 // tx: the fact(s), the search index, and one journal entry per change, all
 // under runID. A rejected fact writes nothing and is reported in the
 // Resolution.
-func Remember(ctx context.Context, tx store.Tx, onto *ontology.Ontology, in reverie.Fact, now time.Time, runID string) (Resolution, error) {
+type RememberOpt func(*rememberCfg)
+
+type rememberCfg struct {
+	phase  string
+	tokens int
+}
+
+// WithJournalMeta attaches phase and token counts to the journal entries
+// written by Remember.
+func WithJournalMeta(phase string, tokens int) RememberOpt {
+	return func(c *rememberCfg) { c.phase, c.tokens = phase, tokens }
+}
+
+func Remember(ctx context.Context, tx store.Tx, onto *ontology.Ontology, in reverie.Fact, now time.Time, runID string, opts ...RememberOpt) (Resolution, error) {
+	var cfg rememberCfg
+	for _, o := range opts {
+		o(&cfg)
+	}
 	norm, _, err := Normalize(in, onto, now)
 	if err != nil {
 		return Resolution{}, err
@@ -69,14 +87,14 @@ func Remember(ctx context.Context, tx store.Tx, onto *ontology.Ontology, in reve
 				return res, err
 			}
 		}
-		if err := journal(ctx, tx, runID, string(res.Op), before[u.ID], &u, res.Reason, now); err != nil {
+		if err := journalMeta(ctx, tx, runID, cfg.phase, string(res.Op), before[u.ID], &u, res.Reason, cfg.tokens, now); err != nil {
 			return res, err
 		}
 	}
 	if res.Op == OpReject {
 		// Nothing changes, but the attempt is on record.
 		rejected := norm
-		if err := journal(ctx, tx, runID, "reject", reverie.Fact{}, &rejected, res.Reason, now); err != nil {
+		if err := journalMeta(ctx, tx, runID, cfg.phase, "reject", reverie.Fact{}, &rejected, res.Reason, cfg.tokens, now); err != nil {
 			return res, err
 		}
 	}
@@ -87,7 +105,7 @@ func Remember(ctx context.Context, tx store.Tx, onto *ontology.Ontology, in reve
 		if err := syncIndex(ctx, tx, res.Fact); err != nil {
 			return res, err
 		}
-		if err := journal(ctx, tx, runID, "create", reverie.Fact{}, &res.Fact, string(res.Op)+": "+res.Reason, now); err != nil {
+		if err := journalMeta(ctx, tx, runID, cfg.phase, "create", reverie.Fact{}, &res.Fact, string(res.Op)+": "+res.Reason, cfg.tokens, now); err != nil {
 			return res, err
 		}
 	}
@@ -159,13 +177,55 @@ func RevertRun(ctx context.Context, tx store.Tx, runID string, now time.Time) (i
 	if err != nil {
 		return 0, err
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && !strings.HasPrefix(runID, "dream:") {
 		return 0, store.ErrNotFound
 	}
 	undone := 0
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
-		if e.Reverted || e.TargetKind != KindFact || e.Op == "reject" {
+		if e.Reverted || e.Op == "reject" {
+			continue
+		}
+		if e.TargetKind == KindEpisode {
+			curEp, err := tx.Episodes().Get(ctx, e.TargetID)
+			if err != nil {
+				return undone, fmt.Errorf("facts: journal entry %d: episode %s: %w", e.ID, e.TargetID, err)
+			}
+			var targetEp store.Episode
+			if len(e.Before) > 0 {
+				if err := json.Unmarshal(e.Before, &targetEp); err != nil {
+					return undone, fmt.Errorf("facts: journal entry %d: %w", e.ID, err)
+				}
+			} else {
+				targetEp = curEp
+				targetEp.Consolidated = false
+				targetEp.Tier = store.Hot
+			}
+			if err := tx.Episodes().Save(ctx, targetEp); err != nil {
+				return undone, err
+			}
+			if err := tx.Journal().MarkReverted(ctx, e.ID); err != nil {
+				return undone, err
+			}
+			beforeBytes, _ := json.Marshal(curEp)
+			afterBytes, _ := json.Marshal(targetEp)
+			if _, err := tx.Journal().Append(ctx, store.JournalEntry{
+				RunID:          "revert:" + runID,
+				Op:             "revert",
+				TargetKind:     KindEpisode,
+				TargetID:       e.TargetID,
+				Before:         beforeBytes,
+				After:          afterBytes,
+				Rationale:      "undo of " + e.Op,
+				SourceEpisodes: []string{e.TargetID},
+				At:             now,
+			}); err != nil {
+				return undone, err
+			}
+			undone++
+			continue
+		}
+		if e.TargetKind != KindFact {
 			continue
 		}
 		cur, err := tx.Facts().Get(ctx, e.TargetID)
@@ -204,10 +264,52 @@ func RevertRun(ctx context.Context, tx store.Tx, runID string, now time.Time) (i
 		}
 		undone++
 	}
+	// If this was a dream run, also restore Consolidated=false on the episodes
+	// that its journal entries or dream report consolidated.
+	if err := unmarkDreamEpisodes(ctx, tx, runID, entries, &undone); err != nil {
+		return undone, err
+	}
 	if undone == 0 {
 		return 0, ErrAlreadyUndone
 	}
 	return undone, nil
+}
+
+func unmarkDreamEpisodes(ctx context.Context, tx store.Tx, runID string, entries []store.JournalEntry, undone *int) error {
+	if !strings.HasPrefix(runID, "dream:") {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		for _, epID := range e.SourceEpisodes {
+			seen[epID] = true
+		}
+	}
+	if dr, err := tx.Dreams().GetRun(ctx, runID); err == nil && len(dr.Report) > 0 {
+		var rep struct {
+			EpisodeIDs []string `json:"episode_ids"`
+		}
+		if json.Unmarshal(dr.Report, &rep) == nil {
+			for _, epID := range rep.EpisodeIDs {
+				seen[epID] = true
+			}
+		}
+	}
+	for epID := range seen {
+		ep, err := tx.Episodes().Get(ctx, epID)
+		if err != nil || !ep.Consolidated {
+			continue
+		}
+		ep.Consolidated = false
+		ep.Tier = store.Hot
+		if err := tx.Episodes().Save(ctx, ep); err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			*undone++
+		}
+	}
+	return nil
 }
 
 // laterRun names the newest unreverted change to the same fact after e, to
@@ -256,7 +358,11 @@ func Text(f reverie.Fact) string {
 }
 
 func journal(ctx context.Context, tx store.Tx, runID, op string, before reverie.Fact, after *reverie.Fact, why string, now time.Time) error {
-	e := store.JournalEntry{RunID: runID, Op: op, TargetKind: KindFact, Rationale: why, At: now}
+	return journalMeta(ctx, tx, runID, "", op, before, after, why, 0, now)
+}
+
+func journalMeta(ctx context.Context, tx store.Tx, runID, phase, op string, before reverie.Fact, after *reverie.Fact, why string, tokens int, now time.Time) error {
+	e := store.JournalEntry{RunID: runID, Phase: phase, Op: op, TargetKind: KindFact, Rationale: why, Tokens: tokens, At: now}
 	if before.ID != "" {
 		b, err := json.Marshal(before)
 		if err != nil {

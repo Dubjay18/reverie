@@ -33,6 +33,7 @@ commands:
   journal  list recent changes to long-term memory, with run ids
   revert   undo a change by run id
   scrub    redact secrets from data stored before redaction existed
+  dream    consolidate episodes into facts (or "dream show <run>", "dream revert <run>")
 
 run "reverie <command> -h" for flags.
 `
@@ -63,6 +64,8 @@ func main() {
 		err = scrubCmd(ctx, os.Args[2:])
 	case "remember", "facts", "forget", "pin", "unpin", "journal", "revert":
 		err = factCmds(ctx, os.Args[1], os.Args[2:])
+	case "dream":
+		err = dreamCmd(ctx, os.Args[2:])
 	case "hook":
 		// A hook must never break the agent: report problems on stderr, exit 0.
 		if herr := hookCmd(ctx, os.Args[2:]); herr != nil {

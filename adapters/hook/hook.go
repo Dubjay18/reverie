@@ -105,6 +105,12 @@ func Handle(ctx context.Context, mem reverie.Memory, d Defaults, r io.Reader, w 
 		// rather than claim success.
 		return record(ctx, mem, event(sc, in, reverie.TaskEnded, reverie.OriginSystem,
 			obj{"outcome": "unknown", "reason": in.Reason}))
+
+	case "Stop":
+		if d, ok := mem.(dreamTrigger); ok {
+			_ = d.TriggerStopDream(ctx, sc)
+		}
+		return nil
 	}
 	return nil // events we do not use (Stop, PreToolUse, ...) are ignored
 }
@@ -235,4 +241,8 @@ func clipRaw(r json.RawMessage) any {
 		return r
 	}
 	return clip(string(r))
+}
+
+type dreamTrigger interface {
+	TriggerStopDream(ctx context.Context, s reverie.Scope) error
 }
