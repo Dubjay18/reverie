@@ -68,14 +68,14 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		if tooLong {
 			s.write(w, response{ID: json.RawMessage("null"), Error: &rpcError{-32600, "request too large"}})
 			if err != nil {
-				return nil
+				return eofOK(err)
 			}
 			continue
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			if err != nil {
-				return nil
+				return eofOK(err)
 			}
 			continue
 		}
@@ -92,7 +92,7 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 		s.write(w, s.handle(ctx, req))
 		if err != nil {
-			return nil
+			return eofOK(err)
 		}
 	}
 }
@@ -202,8 +202,25 @@ var tools = []map[string]any{
 		}, "kind", "text"),
 	},
 	{
+		"name":        "memory_remember",
+		"description": "Remember a fact for future sessions. Give a sentence in text; optionally also entity, relation and value to state it as structured data (for example entity=jay, relation=lives_in, value=London). It is stored as something you were told to remember, not as the user's own words, and a conflicting statement the user made themselves will win over it.",
+		"inputSchema": schema(map[string]any{
+			"text":     prop("string", fmt.Sprintf("What to remember (max %d bytes).", maxRecordText)),
+			"entity":   prop("string", "Optional. Who or what the fact is about."),
+			"relation": prop("string", "Optional. A relation such as prefers, uses, lives_in, decision, lesson. Unknown relations are rejected."),
+			"value":    prop("string", "Optional. The value of the relation."),
+		}, "text"),
+	},
+	{
+		"name":        "memory_forget",
+		"description": "Forget one fact by its ref from a memory_recall citation (fact:<id>). The fact stops being recalled; the change is journaled and the user can undo it. You cannot forget a fact the user stated themselves, and pinned facts cannot be forgotten this way.",
+		"inputSchema": schema(map[string]any{
+			"ref": prop("string", "The fact ref, e.g. fact:01J..."),
+		}, "ref"),
+	},
+	{
 		"name":        "memory_expand",
-		"description": "Return the raw events behind a recalled item. Use the ref shown in brackets, e.g. ep:deploy#01J...A..01J...Z.",
+		"description": "Return the raw events behind a recalled item. Use the ref shown in brackets: ep:deploy#01J...A..01J...Z for an episode, or fact:<id> for the events a fact came from.",
 		"inputSchema": schema(map[string]any{
 			"ref": prop("string", "The ref from a memory_recall citation."),
 		}, "ref"),
@@ -274,6 +291,46 @@ func (s *Server) call(ctx context.Context, name string, args json.RawMessage) (s
 		}
 		return "recorded " + ev.ID.String(), nil
 
+	case "memory_remember":
+		var a struct {
+			Text, Entity, Relation, Value string
+		}
+		if err := decode(args, &a); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(a.Text) == "" && strings.TrimSpace(a.Value) == "" {
+			return "", errors.New("text is required")
+		}
+		if len(a.Text) > maxRecordText || len(a.Value) > maxRecordText {
+			return "", fmt.Errorf("text is too long; the limit is %d bytes", maxRecordText)
+		}
+		in := reverie.FactInput{Entity: a.Entity, Relation: a.Relation, Value: a.Value, Source: reverie.SourceAgent, TaskID: "mcp"}
+		if in.Relation == "" || in.Value == "" {
+			in.Entity, in.Relation, in.Value = "", "", a.Text // a plain sentence is filed as a note
+		}
+		f, err := s.Mem.Remember(ctx, s.Scope, in)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("remembered fact:%s (%s %s: %s)", f.ID, f.Entity, f.Relation, f.Value), nil
+
+	case "memory_forget":
+		var a struct {
+			Ref string `json:"ref"`
+		}
+		if err := decode(args, &a); err != nil {
+			return "", err
+		}
+		ref, err := reverie.ParseRef(a.Ref)
+		if err != nil || ref.FactID == "" {
+			return "", errors.New("ref must be a fact ref like fact:01J...")
+		}
+		run, err := s.Mem.Forget(ctx, s.Scope, ref.FactID, reverie.SourceAgent)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("forgot fact:%s (undo with: reverie revert %s)", ref.FactID, run), nil
+
 	case "memory_expand":
 		var a struct {
 			Ref string `json:"ref"`
@@ -322,4 +379,12 @@ func formatEvents(events []reverie.Event) string {
 		b.WriteString(line)
 	}
 	return b.String()
+}
+
+// eofOK is nil for a normal end of input and the error for a real read failure.
+func eofOK(err error) error {
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }

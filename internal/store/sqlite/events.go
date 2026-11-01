@@ -90,3 +90,17 @@ func (r eventRepo) List(ctx context.Context, q store.EventQuery) ([]reverie.Even
 	}
 	return out, rows.Err()
 }
+
+func (r eventRepo) UpdatePayload(ctx context.Context, id ulid.ULID, payload json.RawMessage) error {
+	sc := r.t.sc
+	res, err := r.t.tx.ExecContext(ctx, `UPDATE events SET payload = ?
+		WHERE tenant = ? AND agent = ? AND project = ? AND usr = ? AND id = ?`,
+		[]byte(payload), sc.Tenant, sc.Agent, sc.Project, sc.User, id.String())
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}

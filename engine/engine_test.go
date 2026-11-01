@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Dubjay18/reverie"
 	"github.com/Dubjay18/reverie/internal/embed"
+	"github.com/Dubjay18/reverie/internal/episodes"
 	"github.com/Dubjay18/reverie/internal/store"
 )
 
@@ -321,4 +323,166 @@ func TestHungEmbedderDoesNotStallRecall(t *testing.T) {
 	if time.Since(start) > 3*time.Second {
 		t.Fatalf("recall took %v with a hung embedder", time.Since(start))
 	}
+}
+
+func TestRedactedPayloadIsAlwaysValidJSON(t *testing.T) {
+	ctx := context.Background()
+	e, _ := Open(t.TempDir() + "/r.db")
+	defer e.Close()
+	if err := e.Record(ctx,
+		ev(sc, "k", reverie.ToolResult, `{"output":"-----BEGIN PRIVATE KEY-----\nMIIEvQ"}`),
+		ev(sc, "k", reverie.ToolResult, `{"a":"-----BEGIN RSA PRIVATE KEY-----\nMII","b":"still here"}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	var got []reverie.Event
+	e.st.For(sc).View(ctx, func(tx store.Tx) (err error) {
+		got, err = tx.Events().List(ctx, store.EventQuery{})
+		return
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d events", len(got))
+	}
+	for _, g := range got {
+		if !json.Valid(g.Payload) || strings.Contains(string(g.Payload), "MII") {
+			t.Fatalf("stored payload is invalid or leaks: %s", g.Payload)
+		}
+	}
+	if !strings.Contains(string(got[1].Payload), "still here") {
+		t.Fatalf("a truncated key swallowed the rest of the payload: %s", got[1].Payload)
+	}
+}
+
+type countingEmbedder struct {
+	calls int
+	err   error
+}
+
+func (c *countingEmbedder) Dimensions() int { return 4 }
+func (c *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	c.calls++
+	if c.err != nil {
+		return nil, c.err
+	}
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1, 0, 0, 0}
+	}
+	return out, nil
+}
+
+func TestEmbedderOutageCostsOneRequestNotOnePerText(t *testing.T) {
+	ctx := context.Background()
+	c := &countingEmbedder{err: errors.New("429 too many requests")}
+	e, _ := Open(t.TempDir()+"/r.db", WithEmbedder(c))
+	defer e.Close()
+	e.stop()
+	<-e.done
+	for _, task := range []string{"a", "b", "c", "d", "e"} {
+		e.Record(ctx, ev(sc, task, reverie.TaskEnded, `{"outcome":"success"}`))
+	}
+	c.calls = 0
+	if _, err := e.EmbedPending(ctx, 10); err == nil {
+		t.Fatal("an outage must be reported")
+	}
+	if c.calls != 1 {
+		t.Fatalf("a failing embedder was called %d times for one tick; want 1", c.calls)
+	}
+	if n := pendingCount(t, e); n != 5 {
+		t.Fatalf("nothing should be parked by an outage, pending=%d", n)
+	}
+}
+
+// pickyOnce rejects one specific text; a transient error then hits the third single.
+type flakyEmbedder struct{ singles int }
+
+func (f *flakyEmbedder) Dimensions() int { return 4 }
+func (f *flakyEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	if len(texts) > 1 {
+		return nil, embed.ErrRejected // something in the batch is bad
+	}
+	f.singles++
+	if f.singles == 3 {
+		return nil, errors.New("connection reset")
+	}
+	return [][]float32{{1, 0, 0, 0}}, nil
+}
+
+func TestPartialSuccessIsKeptWhenAnOutageInterruptsSingles(t *testing.T) {
+	ctx := context.Background()
+	f := &flakyEmbedder{}
+	e, _ := Open(t.TempDir()+"/r.db", WithEmbedder(f))
+	defer e.Close()
+	e.stop()
+	<-e.done
+	for _, task := range []string{"a", "b", "c", "d"} {
+		e.Record(ctx, ev(sc, task, reverie.TaskEnded, `{"outcome":"success"}`))
+	}
+	f.singles = 0
+	n, err := e.EmbedPending(ctx, 10)
+	if err == nil {
+		t.Fatal("the interruption must be reported")
+	}
+	if n != 2 || pendingCount(t, e) != 2 {
+		t.Fatalf("the two vectors computed before the failure must be stored: embedded %d, pending %d", n, pendingCount(t, e))
+	}
+}
+
+func TestScrubRedactsDataStoredBeforeRedactionExisted(t *testing.T) {
+	ctx := context.Background()
+	e, _ := Open(t.TempDir() + "/r.db")
+	defer e.Close()
+	secret := "ghp_" + strings.Repeat("aB3dE", 8)
+	// write through the store, bypassing Record's redaction: the old state
+	err := e.st.For(sc).Tx(ctx, func(tx store.Tx) error {
+		for _, evn := range []reverie.Event{
+			ev(sc, "old", reverie.Message, `{"text":"deploy with `+secret+` please"}`),
+			ev(sc, "old", reverie.TaskEnded, `{"outcome":"success"}`),
+		} {
+			if _, err := tx.Events().Append(ctx, evn); err != nil {
+				return err
+			}
+			if _, err := episodes.Apply(ctx, tx, evn); err != nil {
+				return err
+			}
+		}
+		ep, _ := tx.Episodes().Get(ctx, "old")
+		ep.Goal = "use " + secret
+		if err := tx.Episodes().Save(ctx, ep); err != nil {
+			return err
+		}
+		return episodes.Index(ctx, tx, ep)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := searchText(t, e, "ghp_aB3dEaB3dE"); len(hits) == 0 {
+		t.Fatal("test setup: the secret should be searchable before the scrub")
+	}
+
+	rep, err := e.Scrub(ctx)
+	if err != nil || rep.Events != 1 || rep.Episodes != 1 {
+		t.Fatalf("report %+v err %v", rep, err)
+	}
+	evs, _ := e.Expand(ctx, sc, reverie.Ref{TaskID: "old"})
+	for _, x := range evs {
+		if strings.Contains(string(x.Payload), "aB3dE") {
+			t.Fatalf("secret still in the log: %s", x.Payload)
+		}
+	}
+	if hits := searchText(t, e, "aB3dEaB3dE"); len(hits) != 0 {
+		t.Fatal("secret still searchable after the scrub")
+	}
+	if rep2, _ := e.Scrub(ctx); rep2.Events != 0 || rep2.Episodes != 0 {
+		t.Fatalf("a second scrub should find nothing: %+v", rep2)
+	}
+}
+
+func searchText(t *testing.T, e *Engine, q string) (hits []store.Hit) {
+	t.Helper()
+	e.st.For(sc).View(context.Background(), func(tx store.Tx) (err error) {
+		hits, err = tx.Index().SearchText(context.Background(), q, 10)
+		return
+	})
+	return
 }

@@ -26,6 +26,13 @@ commands:
   hook     handle a Claude Code hook (reads the payload on stdin)
   mcp      serve memory tools over MCP on stdio
   embed    embed waiting items (needs REVERIE_EMBEDDINGS=openai and OPENAI_API_KEY)
+  remember state a fact now (stored as your own words)
+  facts    list what is believed (-asof to see the past, -contested for disputes)
+  forget   forget a fact by its ref
+  pin      protect a fact from dreams; unpin to release it
+  journal  list recent changes to long-term memory, with run ids
+  revert   undo a change by run id
+  scrub    redact secrets from data stored before redaction existed
 
 run "reverie <command> -h" for flags.
 `
@@ -52,6 +59,10 @@ func main() {
 		err = mcpCmd(ctx, os.Args[2:])
 	case "embed":
 		err = embedCmd(ctx, os.Args[2:])
+	case "scrub":
+		err = scrubCmd(ctx, os.Args[2:])
+	case "remember", "facts", "forget", "pin", "unpin", "journal", "revert":
+		err = factCmds(ctx, os.Args[1], os.Args[2:])
 	case "hook":
 		// A hook must never break the agent: report problems on stderr, exit 0.
 		if herr := hookCmd(ctx, os.Args[2:]); herr != nil {

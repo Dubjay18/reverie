@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Dubjay18/reverie"
@@ -72,7 +73,13 @@ func Handle(ctx context.Context, mem reverie.Memory, d Defaults, r io.Reader, w 
 		return printPack(ctx, mem, sc, "", StartBudget, w)
 
 	case "UserPromptSubmit":
-		if err := record(ctx, mem, event(sc, in, reverie.Message, reverie.OriginUser, obj{"text": clip(in.Prompt)})); err != nil {
+		evs := []reverie.Event{event(sc, in, reverie.Message, reverie.OriginUser, obj{"text": clip(in.Prompt)})}
+		if what, ok := rememberRequest(in.Prompt); ok {
+			// The user asked for it in their own words, so it is stored as
+			// user_stated immediately (the engine does that for user-origin feedback).
+			evs = append(evs, event(sc, in, reverie.Feedback, reverie.OriginUser, obj{"remember": clip(what)}))
+		}
+		if err := record(ctx, mem, evs...); err != nil {
 			return err
 		}
 		return printPack(ctx, mem, sc, in.Prompt, PromptBudget, w)
@@ -109,7 +116,7 @@ func (d Defaults) scope(cwd string) reverie.Scope {
 	if sc.Project == "" {
 		// The absolute path, not its last element: two repos both called
 		// "app" must not share memory.
-		sc.Project = filepath.Clean(cwd)
+		sc.Project = Project(cwd)
 	}
 	return sc
 }
@@ -128,6 +135,16 @@ func printPack(ctx context.Context, mem reverie.Memory, sc reverie.Scope, task s
 	if err != nil {
 		return err
 	}
+	// Uncontested agent_stated facts are shown in MCP tool output, not injected
+	// into the hook session pack unless contested.
+	kept := pack.Facts[:0]
+	for _, f := range pack.Facts {
+		if f.Source == reverie.SourceAgent && f.Status != reverie.FactContested {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	pack.Facts = kept
 	out := pack.Render()
 	if out == "" {
 		return nil
@@ -142,12 +159,63 @@ func outputOf(in input) any {
 	var args struct {
 		FilePath string `json:"file_path"`
 		Path     string `json:"path"`
+		Command  string `json:"command"`
 	}
 	_ = json.Unmarshal(in.ToolInput, &args)
-	if guard.SensitivePath(args.FilePath) || guard.SensitivePath(args.Path) {
+	if guard.SensitivePath(args.FilePath) || guard.SensitivePath(args.Path) || touchesSecrets(args.Command) {
 		return "[omitted: sensitive path]"
 	}
 	return clipRaw(in.ToolResp)
+}
+
+// dumpsEnv are commands whose whole point is to print the environment.
+var dumpsEnv = map[string]bool{"env": true, "printenv": true, "set": true, "export": true}
+
+// touchesSecrets reports whether a shell command names a credentials file
+// (cat .env, source ~/.aws/credentials) or dumps the environment. Pattern
+// redaction still runs either way; this drops the output entirely.
+func touchesSecrets(cmd string) bool {
+	if strings.TrimSpace(cmd) == "" {
+		return false
+	}
+	for _, seg := range regexp.MustCompile(`[;&|\n]+`).Split(cmd, -1) {
+		words := strings.Fields(seg)
+		if len(words) > 0 && dumpsEnv[words[0]] && (len(words) == 1 || words[0] == "printenv") {
+			return true
+		}
+		for _, w := range words {
+			if guard.SensitivePath(strings.Trim(w, `"'`+"`")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Project returns the project name for a working directory: its absolute,
+// symlink-resolved path, so the hook and the MCP server agree even when the
+// shell's $PWD goes through a symlink.
+func Project(cwd string) string {
+	if cwd == "" {
+		return "unknown"
+	}
+	p := filepath.Clean(cwd)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	return p
+}
+
+var rememberRE = regexp.MustCompile(`(?is)^\s*(?:please\s+)?remember(?:\s+that|\s*:)?\s+(\S.*)$`)
+
+// rememberRequest recognises "remember that ...", "please remember: ..." and
+// "remember ..." at the start of a prompt typed by the user.
+func rememberRequest(prompt string) (string, bool) {
+	m := rememberRE.FindStringSubmatch(prompt)
+	if m == nil {
+		return "", false
+	}
+	return strings.TrimSpace(m[1]), true
 }
 
 func isOwnTool(name string) bool { return strings.HasPrefix(name, "mcp__reverie__") }

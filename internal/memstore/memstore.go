@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -71,4 +72,12 @@ func (m *Store) Recall(ctx context.Context, s reverie.Scope, task string, budget
 		})
 	}
 	return pack, nil
+}
+
+func (m *Store) Remember(context.Context, reverie.Scope, reverie.FactInput) (reverie.Fact, error) {
+	return reverie.Fact{}, errors.New("memstore: facts are not supported")
+}
+
+func (m *Store) Forget(context.Context, reverie.Scope, string, reverie.FactSource) (string, error) {
+	return "", errors.New("memstore: facts are not supported")
 }

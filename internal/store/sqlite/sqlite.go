@@ -117,6 +117,8 @@ type txn struct {
 func (t *txn) Events() store.EventRepo     { return eventRepo{t} }
 func (t *txn) Episodes() store.EpisodeRepo { return episodeRepo{t} }
 func (t *txn) Index() store.IndexRepo      { return indexRepo{t} }
+func (t *txn) Facts() store.FactRepo       { return factRepo{t} }
+func (t *txn) Journal() store.JournalRepo  { return journalRepo{t} }
 
 // checkMeta pins the embedding model and dimension on first use and refuses a
 // different one afterwards: mixing embedders silently corrupts similarity.

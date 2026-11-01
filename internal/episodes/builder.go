@@ -11,9 +11,9 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/internal/guard"
 	"github.com/Dubjay18/reverie/internal/store"
 )
 
@@ -230,18 +230,5 @@ func Index(ctx context.Context, tx store.Tx, ep store.Episode) error {
 
 const gistCap = 160
 
-// clip keeps a one-line, length-capped excerpt for display.
-func clip(s string) string {
-	// Fields folds whitespace controls; Map drops the rest (ESC and other
-	// C0/C1 controls would otherwise reach a terminal or a model prompt).
-	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) && !unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, s)), " ")
-	if len(s) <= gistCap {
-		return s
-	}
-	return strings.ToValidUTF8(s[:gistCap], "") + "…"
-}
+// clip keeps a one-line, length-capped, control-free excerpt for display.
+func clip(s string) string { return guard.OneLine(s, gistCap) }

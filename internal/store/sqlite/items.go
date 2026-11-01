@@ -39,6 +39,19 @@ func (r indexRepo) Upsert(ctx context.Context, it store.Item) error {
 	return nil
 }
 
+func (r indexRepo) Delete(ctx context.Context, kind, refID string) error {
+	sc := r.t.sc
+	for _, q := range []string{
+		`DELETE FROM items WHERE tenant = ? AND agent = ? AND project = ? AND usr = ? AND kind = ? AND ref_id = ?`,
+		`DELETE FROM items_fts WHERE tenant = ? AND agent = ? AND project = ? AND usr = ? AND kind = ? AND ref_id = ?`,
+	} {
+		if _, err := r.t.tx.ExecContext(ctx, q, sc.Tenant, sc.Agent, sc.Project, sc.User, kind, refID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r indexRepo) MarkEmbedFailed(ctx context.Context, kind, refID string) error {
 	sc := r.t.sc
 	_, err := r.t.tx.ExecContext(ctx, `UPDATE items SET embed_failures = embed_failures + 1

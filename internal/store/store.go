@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -41,6 +42,8 @@ type Tx interface {
 	Events() EventRepo
 	Episodes() EpisodeRepo
 	Index() IndexRepo
+	Facts() FactRepo
+	Journal() JournalRepo
 }
 
 type EventRepo interface {
@@ -48,6 +51,10 @@ type EventRepo interface {
 	// that ID already exists, so retried writes are harmless.
 	Append(ctx context.Context, ev reverie.Event) (inserted bool, err error)
 	List(ctx context.Context, q EventQuery) ([]reverie.Event, error)
+	// UpdatePayload rewrites one event's payload. The log is append-only, so
+	// this exists only for scrubbing secrets out of data stored before they
+	// were redacted on the way in.
+	UpdatePayload(ctx context.Context, id ulid.ULID, payload json.RawMessage) error
 }
 
 // EventQuery selects events in ULID (time) order. Zero values mean no filter.
@@ -142,8 +149,61 @@ type IndexRepo interface {
 	Pending(ctx context.Context, limit int) ([]Item, error)
 	// MarkEmbedFailed counts one failed attempt against the item.
 	MarkEmbedFailed(ctx context.Context, kind, refID string) error
+	// Delete removes an item from search (a superseded or forgotten fact).
+	Delete(ctx context.Context, kind, refID string) error
 	// SearchText matches any word of query (full-text, best first).
 	SearchText(ctx context.Context, query string, limit int) ([]Hit, error)
 	// SearchVector ranks embedded items by cosine similarity, best first.
 	SearchVector(ctx context.Context, vec []float32, limit int) ([]Hit, error)
+}
+
+// FactQuery narrows Query and AsOf. Zero values mean no filter.
+type FactQuery struct {
+	Entity        string
+	Relation      string
+	OnlyContested bool
+	OnlyPinned    bool
+	Limit         int
+}
+
+// FactRepo stores facts. Reads return only what is currently believed
+// (valid_to unset, status active or contested) unless they are AsOf; the
+// filter lives here so a caller cannot forget it.
+type FactRepo interface {
+	// Save inserts or replaces a fact and its provenance.
+	Save(ctx context.Context, f reverie.Fact) error
+	Get(ctx context.Context, id string) (reverie.Fact, error) // any status; ErrNotFound if absent
+	// Live returns the believed facts for one entity and relation, oldest first.
+	Live(ctx context.Context, entity, relation string) ([]reverie.Fact, error)
+	Query(ctx context.Context, q FactQuery) ([]reverie.Fact, error)
+	// AsOf returns what was true at t, including facts since superseded.
+	AsOf(ctx context.Context, q FactQuery, t time.Time) ([]reverie.Fact, error)
+	// Related returns believed facts whose entity or value equals one of
+	// names (case-insensitive): one hop of entity expansion.
+	Related(ctx context.Context, names []string, limit int) ([]reverie.Fact, error)
+}
+
+// JournalEntry records one change with enough to undo it.
+type JournalEntry struct {
+	ID             int64
+	RunID          string // empty for a manual change
+	Phase          string
+	Op             string
+	TargetKind     string // "fact"
+	TargetID       string
+	Before, After  json.RawMessage // the target before and after; nil when it did not exist
+	Rationale      string
+	SourceEpisodes []string
+	Tokens         int
+	At             time.Time
+	Reverted       bool
+}
+
+type JournalRepo interface {
+	Append(ctx context.Context, e JournalEntry) (int64, error)
+	Get(ctx context.Context, id int64) (JournalEntry, error) // ErrNotFound if absent
+	ByRun(ctx context.Context, runID string) ([]JournalEntry, error)
+	// Recent returns the newest entries first.
+	Recent(ctx context.Context, limit int) ([]JournalEntry, error)
+	MarkReverted(ctx context.Context, id int64) error
 }

@@ -14,6 +14,15 @@ type Memory interface {
 	// Expand returns the raw events behind a pack item, oldest first. A
 	// result at the engine's cap means "narrow the range and ask again".
 	Expand(ctx context.Context, s Scope, ref Ref) ([]Event, error)
+	// Remember states a fact now, without waiting for a dream. in.Source
+	// says how far to trust it; adapters pass SourceUser only for words the
+	// user typed themselves.
+	Remember(ctx context.Context, s Scope, in FactInput) (Fact, error)
+	// Forget tombstones one fact by id (the "fact:<id>" in a pack citation) and
+	// returns the run id that Revert takes to undo it. by is who is asking: a
+	// caller cannot forget a fact from a source more trusted than itself, so an
+	// agent cannot erase what the user said.
+	Forget(ctx context.Context, s Scope, factID string, by FactSource) (runID string, err error)
 }
 
 type ContextPack struct {
@@ -27,11 +36,13 @@ type ContextPack struct {
 }
 
 type PackItem struct {
-	ID     string  // so the agent can cite or flag it
-	Kind   string  // skill | fact | episode | insight
-	Cite   string  // "ep:<task>#<from>..<to> @<time>"; the first word is a valid Ref
-	Text   string  // already rendered, ready for the prompt
-	Score  float64 // why it ranked here
+	ID     string     // so the agent can cite or flag it
+	Kind   string     // skill | fact | episode | insight
+	Cite   string     // "ep:<task>#<from>..<to> @<time>"; the first word is a valid Ref
+	Text   string     // already rendered, ready for the prompt
+	Source FactSource // set for fact items so callers do not inspect Text
+	Status FactStatus // set for fact items so callers do not inspect Text
+	Score  float64    // why it ranked here
 	Tokens int
 	Hot    bool // recent and not yet consolidated
 }

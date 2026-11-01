@@ -10,6 +10,7 @@ func TestRefRoundtrip(t *testing.T) {
 		{TaskID: "deploy", From: a},
 		{TaskID: "deploy", To: b},
 		{TaskID: "weird#task"},
+		{FactID: "01ABC"},
 	} {
 		got, err := ParseRef(r.String())
 		if err != nil || got != r {
@@ -20,7 +21,7 @@ func TestRefRoundtrip(t *testing.T) {
 		t.Errorf("trailing citation text must be ignored: %+v %v", r, err)
 	}
 	for _, bad := range []string{"", "deploy", "ep:", "ev:abc", "ep:deploy#01ZZZ..", "ep:deploy#..01ZZZ", "ep:deploy#01ABC..01DEF",
-		"ep:deploy#" + b.String() + ".." + a.String()} {
+		"fact:", "ep:deploy#" + b.String() + ".." + a.String()} {
 		if _, err := ParseRef(bad); err == nil {
 			t.Errorf("%q must fail", bad)
 		}

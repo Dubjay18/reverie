@@ -5,17 +5,22 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Dubjay18/reverie"
 	"github.com/Dubjay18/reverie/internal/embed"
 	"github.com/Dubjay18/reverie/internal/episodes"
+	"github.com/Dubjay18/reverie/internal/facts"
 	"github.com/Dubjay18/reverie/internal/guard"
+	"github.com/Dubjay18/reverie/internal/ontology"
 	"github.com/Dubjay18/reverie/internal/recall"
 	"github.com/Dubjay18/reverie/internal/store"
 	"github.com/Dubjay18/reverie/internal/store/sqlite"
+	"github.com/oklog/ulid/v2"
 )
 
 type Engine struct {
@@ -24,6 +29,7 @@ type Engine struct {
 	emb          embed.Embedder
 	tok          recall.Tokenizer
 	embedTimeout time.Duration // bound on the per-query embedding call in Recall
+	onto         *ontology.Ontology
 	kick         chan struct{}
 	stop         context.CancelFunc
 	done         chan struct{}
@@ -37,6 +43,9 @@ func WithEmbedder(e embed.Embedder) Option { return func(g *Engine) { g.emb = e 
 
 // WithTokenizer replaces the approximate token counter used for budgets.
 func WithTokenizer(t recall.Tokenizer) Option { return func(g *Engine) { g.tok = t } }
+
+// WithOntology replaces the built-in ontology (see internal/ontology).
+func WithOntology(o *ontology.Ontology) Option { return func(g *Engine) { g.onto = o } }
 
 // Open returns a Memory backed by a SQLite file.
 func Open(path string, opts ...Option) (*Engine, error) {
@@ -61,7 +70,7 @@ func Open(path string, opts ...Option) (*Engine, error) {
 
 // New wraps an existing store. The engine takes ownership: Close closes it.
 func New(st store.Store, opts ...Option) *Engine {
-	e := &Engine{st: st, now: time.Now, embedTimeout: 2 * time.Second, kick: make(chan struct{}, 1), done: make(chan struct{})}
+	e := &Engine{st: st, now: time.Now, onto: ontology.Default(), embedTimeout: 2 * time.Second, kick: make(chan struct{}, 1), done: make(chan struct{})}
 	for _, o := range opts {
 		o(e)
 	}
@@ -111,8 +120,7 @@ func (e *Engine) Record(ctx context.Context, events ...reverie.Event) error {
 	var order []reverie.Scope
 	groups := map[reverie.Scope][]reverie.Event{}
 	for _, ev := range events {
-		// Secrets never reach the log, the search index or an Expand result.
-		ev.Payload = guard.RedactBytes(ev.Payload)
+		ev.Payload = redactPayload(ev.Payload)
 		if _, ok := groups[ev.Scope]; !ok {
 			order = append(order, ev.Scope)
 		}
@@ -134,6 +142,9 @@ func (e *Engine) Record(ctx context.Context, events ...reverie.Event) error {
 				}
 				if !inserted {
 					continue
+				}
+				if err := e.rememberFromEvent(ctx, tx, ev); err != nil {
+					return err
 				}
 				ep, err := episodes.Apply(ctx, tx, ev)
 				if err != nil {
@@ -209,6 +220,28 @@ const MaxExpand = 500
 
 func (e *Engine) Expand(ctx context.Context, s reverie.Scope, ref reverie.Ref) ([]reverie.Event, error) {
 	var out []reverie.Event
+	if ref.FactID != "" {
+		// the events behind a fact: every task it came from, oldest first
+		err := e.st.For(s).View(ctx, func(tx store.Tx) error {
+			f, err := tx.Facts().Get(ctx, ref.FactID)
+			if err != nil {
+				return err
+			}
+			for _, task := range f.EpisodeIDs {
+				evs, err := tx.Events().List(ctx, store.EventQuery{TaskID: task, Limit: MaxExpand})
+				if err != nil {
+					return err
+				}
+				out = append(out, evs...)
+				if len(out) >= MaxExpand {
+					out = out[:MaxExpand]
+					break
+				}
+			}
+			return nil
+		})
+		return out, err
+	}
 	err := e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
 		out, err = tx.Events().List(ctx, store.EventQuery{TaskID: ref.TaskID, From: ref.From, To: ref.To, Limit: MaxExpand})
 		return err
@@ -243,9 +276,9 @@ func (e *Engine) EmbedPending(ctx context.Context, batch int) (int, error) {
 		if len(pending) == 0 {
 			continue
 		}
-		vecs, failed, err := e.embedItems(ctx, pending) // network calls, outside any transaction
-		if err != nil {
-			return total, err
+		vecs, failed, embErr := e.embedItems(ctx, pending) // network calls, outside any transaction
+		if vecs == nil {
+			return total, embErr // nothing usable
 		}
 		err = e.st.For(sc).Tx(ctx, func(tx store.Tx) error {
 			for i, it := range pending {
@@ -270,6 +303,9 @@ func (e *Engine) EmbedPending(ctx context.Context, batch int) (int, error) {
 		if err != nil {
 			return total, err
 		}
+		if embErr != nil {
+			return total, embErr // partial results are stored; report the outage
+		}
 	}
 	return total, nil
 }
@@ -287,14 +323,20 @@ func (e *Engine) embedItems(ctx context.Context, items []store.Item) (vecs [][]f
 	vecs = make([][]float32, len(items))
 	rejected = make([]bool, len(items))
 
-	if got, berr := e.emb.Embed(ctx, texts); berr == nil && len(got) == len(items) {
+	got, berr := e.emb.Embed(ctx, texts)
+	if berr == nil && len(got) == len(items) {
 		copy(vecs, got)
 		return vecs, rejected, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+	if berr == nil {
+		berr = errors.New("engine: embedder returned a wrong number of vectors")
 	}
-	var outage error
+	// Only a rejected input is worth retrying alone. Any other failure (a
+	// timeout, a 429, a 5xx) means the embedder is struggling, and one request
+	// per text would only add load: report it and try again on the next tick.
+	if !errors.Is(berr, embed.ErrRejected) {
+		return nil, nil, berr
+	}
 	for i := range items {
 		got, serr := e.emb.Embed(ctx, texts[i:i+1])
 		switch {
@@ -306,11 +348,9 @@ func (e *Engine) embedItems(ctx context.Context, items []store.Item) (vecs [][]f
 			if serr == nil {
 				serr = errors.New("engine: embedder returned a wrong number of vectors")
 			}
-			outage = serr
+			// keep what already succeeded; the rest stay pending
+			return vecs, rejected, serr
 		}
-	}
-	if outage != nil {
-		return nil, nil, outage
 	}
 	return vecs, rejected, nil
 }
@@ -340,4 +380,259 @@ func (e *Engine) embedLoop(ctx context.Context) {
 		case <-tick.C:
 		}
 	}
+}
+
+// rememberFromEvent turns the user's own "remember ..." into a fact in the
+// same transaction as the event, with no model call. Only a Feedback event
+// with user_input origin counts: tool output and agent text cannot mint one.
+//
+// The payload is {"remember": "free text"}, optionally with "entity",
+// "relation" and "value" to state a triple. Free text is filed as a note about
+// the user, because turning a sentence into a triple needs a model and the
+// write path has none.
+func (e *Engine) rememberFromEvent(ctx context.Context, tx store.Tx, ev reverie.Event) error {
+	if ev.Kind != reverie.Feedback || ev.Origin != reverie.OriginUser {
+		return nil
+	}
+	var p struct {
+		Remember string `json:"remember"`
+		Entity   string `json:"entity"`
+		Relation string `json:"relation"`
+		Value    string `json:"value"`
+	}
+	if json.Unmarshal(ev.Payload, &p) != nil || strings.TrimSpace(p.Remember) == "" {
+		return nil
+	}
+	in := reverie.FactInput{Entity: p.Entity, Relation: p.Relation, Value: p.Value, Source: reverie.SourceUser, TaskID: ev.TaskID, ValidAt: ev.At}
+	if in.Relation == "" || in.Value == "" || !e.onto.Has(strings.ToLower(strings.TrimSpace(in.Relation))) {
+		in.Entity, in.Relation, in.Value = "", "", p.Remember
+	}
+	_, err := e.assertInput(ctx, tx, in, facts.NewRunID("remember"))
+	return err
+}
+
+func (e *Engine) assertInput(ctx context.Context, tx store.Tx, in reverie.FactInput, runID string) (facts.Resolution, error) {
+	f := reverie.Fact{
+		ID: ulid.Make().String(), Entity: in.Entity, Relation: in.Relation, Value: in.Value,
+		Source: in.Source, ValidFrom: in.ValidAt, EpisodeIDs: []string{in.TaskID},
+	}
+	if f.Entity == "" {
+		f.Entity = "user"
+	}
+	if f.Relation == "" {
+		f.Relation = "note"
+	}
+	if in.TaskID == "" {
+		f.EpisodeIDs = []string{"manual"}
+	}
+	return facts.Remember(ctx, tx, e.onto, f, e.now(), runID)
+}
+
+// ErrRejected is returned by Remember when a more trusted fact already holds
+// the place the new one would take.
+var ErrRejected = errors.New("engine: not stored: a more trusted fact already holds that")
+
+// Remember states a fact now. The caller chooses in.Source; an adapter that
+// relays a user's own words passes SourceUser, one acting for an agent passes
+// SourceAgent. A free-form value (no relation) is filed as a note about "user".
+// The returned Fact is the one stored, or the one it merged into.
+func (e *Engine) Remember(ctx context.Context, s reverie.Scope, in reverie.FactInput) (reverie.Fact, error) {
+	// No default: whoever calls decides how far the fact is trusted, and
+	// silently choosing "the user said it" would make it unbeatable.
+	if in.Source != reverie.SourceUser && in.Source != reverie.SourceAgent {
+		return reverie.Fact{}, fmt.Errorf("engine: Remember needs Source user_stated or agent_stated, got %q", in.Source)
+	}
+	if in.TaskID == "" {
+		in.TaskID = "manual:" + e.now().UTC().Format("2006-01-02")
+	}
+	in.Value = guard.Redact(in.Value)
+	var out reverie.Fact
+	var rejected error
+	err := e.st.For(s).Tx(ctx, func(tx store.Tx) error {
+		// the provenance event: what was said, when, by whom
+		payload, _ := json.Marshal(map[string]string{"remember": in.Value, "entity": in.Entity, "relation": in.Relation, "source": string(in.Source)})
+		origin := reverie.OriginAgent
+		if in.Source == reverie.SourceUser {
+			origin = reverie.OriginUser
+		}
+		ev := reverie.NewEvent(s, in.TaskID, reverie.Feedback, origin, payload)
+		ev.At = e.now().UTC()
+		if _, err := tx.Events().Append(ctx, ev); err != nil {
+			return err
+		}
+		if _, err := episodes.Apply(ctx, tx, ev); err != nil && !errors.Is(err, episodes.ErrTaskClosed) {
+			return err
+		}
+		in.ValidAt = firstNonZero(in.ValidAt, ev.At)
+		res, err := e.assertInput(ctx, tx, in, facts.NewRunID("remember"))
+		if err != nil {
+			return err
+		}
+		switch res.Op {
+		case facts.OpReject:
+			// Commit, so the attempt stays in the log and the journal; report
+			// the refusal to the caller afterwards.
+			rejected = fmt.Errorf("%w (%s)", ErrRejected, res.Reason)
+			return nil
+		case facts.OpMerge:
+			out = res.Updates[0]
+		default:
+			out = res.Fact
+		}
+		return nil
+	})
+	if err == nil {
+		err = rejected
+	}
+	return out, err
+}
+
+func firstNonZero(a, b time.Time) time.Time {
+	if !a.IsZero() {
+		return a
+	}
+	return b
+}
+
+// Forget tombstones one fact by id and returns the run id for Revert. by is
+// the caller's trust: pass reverie.SourceUser for a person at the CLI and
+// reverie.SourceAgent for an agent's tool call.
+func (e *Engine) Forget(ctx context.Context, s reverie.Scope, factID string, by reverie.FactSource) (string, error) {
+	run := facts.NewRunID("forget")
+	err := e.st.For(s).Tx(ctx, func(tx store.Tx) error {
+		return facts.Forget(ctx, tx, factID, by, e.now(), run)
+	})
+	if err != nil {
+		return "", err
+	}
+	return run, nil
+}
+
+// Pin protects a fact from being changed or expired by a dream.
+func (e *Engine) Pin(ctx context.Context, s reverie.Scope, factID string, pinned bool) error {
+	return e.st.For(s).Tx(ctx, func(tx store.Tx) error {
+		return facts.SetPinned(ctx, tx, factID, pinned, e.now(), facts.NewRunID("pin"))
+	})
+}
+
+// Revert undoes everything journaled under runID and returns how many
+// changes it undid.
+func (e *Engine) Revert(ctx context.Context, s reverie.Scope, runID string) (n int, err error) {
+	err = e.st.For(s).Tx(ctx, func(tx store.Tx) (err error) {
+		n, err = facts.RevertRun(ctx, tx, runID, e.now())
+		return err
+	})
+	return n, err
+}
+
+// Facts lists what is believed, newest and most confident first, optionally
+// filtered. asOf, when non-zero, returns what was true at that time instead.
+func (e *Engine) Facts(ctx context.Context, s reverie.Scope, q store.FactQuery, asOf time.Time) (out []reverie.Fact, err error) {
+	err = e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
+		if asOf.IsZero() {
+			out, err = tx.Facts().Query(ctx, q)
+		} else {
+			out, err = tx.Facts().AsOf(ctx, q, asOf)
+		}
+		return err
+	})
+	return out, err
+}
+
+// Journal lists the newest journal entries, newest first: every change to
+// long-term memory with the run id to pass to Revert.
+func (e *Engine) Journal(ctx context.Context, s reverie.Scope, limit int) (out []store.JournalEntry, err error) {
+	err = e.st.For(s).View(ctx, func(tx store.Tx) (err error) {
+		out, err = tx.Journal().Recent(ctx, limit)
+		return err
+	})
+	return out, err
+}
+
+// redactPayload keeps secrets out of the log, the search index and Expand
+// results. Redaction rewrites text, so the result is checked again: if it is
+// no longer valid JSON or has outgrown the size cap, the payload is replaced
+// by a marker rather than stored broken.
+func redactPayload(p json.RawMessage) json.RawMessage {
+	out := guard.RedactBytes(p)
+	if len(out) == len(p) && string(out) == string(p) {
+		return p
+	}
+	if !json.Valid(out) || len(out) > reverie.MaxPayload {
+		return json.RawMessage(`{"redacted":"payload replaced: redaction could not keep it valid"}`)
+	}
+	return out
+}
+
+// ScrubReport counts what Scrub changed.
+type ScrubReport struct{ Events, Episodes int }
+
+// Scrub redacts secrets from data stored before redaction existed, or before
+// a rule was added: event payloads, episode titles and gists, and the search
+// text built from them. It is safe to run repeatedly.
+func (e *Engine) Scrub(ctx context.Context) (ScrubReport, error) {
+	var rep ScrubReport
+	scopes, err := e.st.Scopes(ctx)
+	if err != nil {
+		return rep, err
+	}
+	for _, sc := range scopes {
+		err := e.st.For(sc).Tx(ctx, func(tx store.Tx) error {
+			dirty := map[string]bool{} // tasks whose events changed
+			var after ulid.ULID
+			for {
+				page, err := tx.Events().List(ctx, store.EventQuery{After: after, Limit: store.MaxLimit})
+				if err != nil {
+					return err
+				}
+				for _, ev := range page {
+					after = ev.ID
+					if clean := redactPayload(ev.Payload); string(clean) != string(ev.Payload) {
+						if err := tx.Events().UpdatePayload(ctx, ev.ID, clean); err != nil {
+							return err
+						}
+						dirty[ev.TaskID] = true
+						rep.Events++
+					}
+				}
+				if len(page) < store.MaxLimit {
+					break
+				}
+			}
+			var eps []store.Episode
+			open, err := tx.Episodes().Open(ctx)
+			if err != nil {
+				return err
+			}
+			closed, err := tx.Episodes().Recent(ctx, store.MaxLimit)
+			if err != nil {
+				return err
+			}
+			eps = append(open, closed...)
+			for _, ep := range eps {
+				changed := false
+				for _, f := range []*string{&ep.Title, &ep.Goal, &ep.LastError} {
+					if c := guard.Redact(*f); c != *f {
+						*f, changed = c, true
+					}
+				}
+				if changed {
+					if err := tx.Episodes().Save(ctx, ep); err != nil {
+						return err
+					}
+					rep.Episodes++
+				}
+				if (changed || dirty[ep.TaskID]) && ep.Closed {
+					if err := episodes.Index(ctx, tx, ep); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return rep, err
+		}
+	}
+	return rep, nil
 }

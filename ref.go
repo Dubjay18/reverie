@@ -14,12 +14,16 @@ import (
 type Ref struct {
 	TaskID   string
 	From, To ulid.ULID // zero means unbounded on that side
+	FactID   string    // "fact:<id>": the events behind a fact; TaskID and the range are unused
 }
 
-var ErrBadRef = errors.New("reverie: malformed ref, want ep:<task> or ep:<task>#<from>..<to>")
+var ErrBadRef = errors.New("reverie: malformed ref, want ep:<task>, ep:<task>#<from>..<to> or fact:<id>")
 
 // String renders "ep:<task>" or "ep:<task>#<from>..<to>".
 func (r Ref) String() string {
+	if r.FactID != "" {
+		return "fact:" + r.FactID
+	}
 	if r.From == (ulid.ULID{}) && r.To == (ulid.ULID{}) {
 		return "ep:" + r.TaskID
 	}
@@ -39,6 +43,12 @@ func ParseRef(s string) (Ref, error) {
 	s = strings.TrimSpace(s)
 	if f := strings.Fields(s); len(f) > 0 {
 		s = f[0]
+	}
+	if id, ok := strings.CutPrefix(s, "fact:"); ok {
+		if id == "" {
+			return Ref{}, ErrBadRef
+		}
+		return Ref{FactID: id}, nil
 	}
 	rest, ok := strings.CutPrefix(s, "ep:")
 	if !ok || rest == "" {

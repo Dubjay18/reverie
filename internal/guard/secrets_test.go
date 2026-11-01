@@ -69,3 +69,12 @@ func TestSensitivePath(t *testing.T) {
 		}
 	}
 }
+
+func TestOneLine(t *testing.T) {
+	if got := OneLine("a\x1b[31m  b\n\tc\x07", 0); got != "a[31m b c" {
+		t.Errorf("got %q", got)
+	}
+	if got := OneLine(strings.Repeat("é", 100), 11); len(got) > 14 || !strings.HasSuffix(got, "…") {
+		t.Errorf("cut must stay on a rune boundary: %q", got)
+	}
+}
