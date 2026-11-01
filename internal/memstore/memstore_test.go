@@ -15,8 +15,8 @@ func TestRecordRecallRespectsScopeAndBudget(t *testing.T) {
 	b.User = "u2"
 
 	if err := m.Record(ctx,
-		reverie.NewEvent(a, "t1", reverie.Message, []byte(`{"text":"hello"}`)),
-		reverie.NewEvent(b, "t1", reverie.Message, []byte(`{"text":"other user"}`)),
+		reverie.NewEvent(a, "t1", reverie.Message, reverie.OriginUser, []byte(`{"text":"hello"}`)),
+		reverie.NewEvent(b, "t1", reverie.Message, reverie.OriginUser, []byte(`{"text":"other user"}`)),
 	); err != nil {
 		t.Fatal(err)
 	}

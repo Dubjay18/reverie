@@ -1,22 +1,24 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
+	"os/signal"
 	"time"
 
 	"github.com/Dubjay18/reverie"
+	"github.com/Dubjay18/reverie/engine"
+	"github.com/Dubjay18/reverie/internal/store"
+	"github.com/oklog/ulid/v2"
 )
 
 const usage = `usage: reverie <command> [flags]
 
 commands:
-  record   append an event to the log
+  record   append an event
   tail     print events, then follow new ones
 
 run "reverie <command> -h" for flags.
@@ -27,103 +29,121 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	var err error
 	switch os.Args[1] {
 	case "record":
-		err = record(os.Args[2:])
+		err = record(ctx, os.Args[2:])
 	case "tail":
-		err = tail(os.Args[2:])
+		err = tail(ctx, os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func record(args []string) error {
+type common struct {
+	db    string
+	scope reverie.Scope
+}
+
+func (c *common) bind(fs *flag.FlagSet) {
+	fs.StringVar(&c.db, "db", envOr("REVERIE_DB", "reverie.db"), "database file (env REVERIE_DB)")
+	fs.StringVar(&c.scope.Tenant, "tenant", "default", "tenant")
+	fs.StringVar(&c.scope.Agent, "agent", "default", "agent")
+	fs.StringVar(&c.scope.Project, "project", "default", "project")
+	fs.StringVar(&c.scope.User, "user", "default", "user")
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func record(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
-	file := fs.String("file", "reverie.jsonl", "event log file")
-	var s reverie.Scope
-	fs.StringVar(&s.Tenant, "tenant", "default", "tenant")
-	fs.StringVar(&s.Agent, "agent", "default", "agent")
-	fs.StringVar(&s.Project, "project", "default", "project")
-	fs.StringVar(&s.User, "user", "default", "user")
-	task := fs.String("task", "", "task id")
+	var c common
+	c.bind(fs)
+	task := fs.String("task", "", "task id (required)")
 	kind := fs.String("kind", string(reverie.Message), "event kind")
-	text := fs.String("text", "", "event text (stored as payload {\"text\": ...})")
+	origin := fs.String("origin", string(reverie.OriginUser), "event origin")
+	text := fs.String("text", "", `shorthand for -payload '{"text": ...}'`)
+	payload := fs.String("payload", "", "raw JSON payload")
 	fs.Parse(args)
 
-	payload, err := json.Marshal(map[string]string{"text": *text})
-	if err != nil {
-		return err
+	p := json.RawMessage(*payload)
+	if *payload == "" {
+		var err error
+		if p, err = json.Marshal(map[string]string{"text": *text}); err != nil {
+			return err
+		}
 	}
-	e := reverie.NewEvent(s, *task, reverie.EventKind(*kind), payload)
+	e := reverie.NewEvent(c.scope, *task, reverie.EventKind(*kind), reverie.Origin(*origin), p)
 
-	f, err := os.OpenFile(*file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	eng, err := engine.Open(c.db)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	line, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	defer eng.Close()
+	if err := eng.Record(ctx, e); err != nil {
 		return err
 	}
 	fmt.Println(e.ID)
 	return nil
 }
 
-func tail(args []string) error {
+func tail(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("tail", flag.ExitOnError)
-	file := fs.String("file", "reverie.jsonl", "event log file")
+	var c common
+	c.bind(fs)
+	task := fs.String("task", "", "only this task id")
 	follow := fs.Bool("f", true, "keep waiting for new events")
 	fs.Parse(args)
 
-	f, err := os.Open(*file)
-	if errors.Is(err, os.ErrNotExist) && *follow {
-		// wait for the first record
-		for errors.Is(err, os.ErrNotExist) {
-			time.Sleep(500 * time.Millisecond)
-			f, err = os.Open(*file)
-		}
-	}
+	eng, err := engine.Open(c.db)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer eng.Close()
 
-	r := bufio.NewReader(f)
-	var partial []byte
+	var after ulid.ULID
 	for {
-		chunk, err := r.ReadBytes('\n')
-		partial = append(partial, chunk...)
-		if err == nil {
-			printEvent(partial)
-			partial = nil
-			continue
-		}
-		if !errors.Is(err, io.EOF) {
+		var batch []reverie.Event
+		err := eng.Store().For(c.scope).View(ctx, func(tx store.Tx) (err error) {
+			batch, err = tx.Events().List(ctx, store.EventQuery{TaskID: *task, After: after})
 			return err
+		})
+		if err != nil {
+			return err
+		}
+		for _, e := range batch {
+			printEvent(e)
+			after = e.ID
+		}
+		if len(batch) > 0 {
+			continue // there may be more than one page
 		}
 		if !*follow {
 			return nil
 		}
-		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
 }
 
-func printEvent(line []byte) {
-	var e reverie.Event
-	if err := json.Unmarshal(line, &e); err != nil {
-		fmt.Fprintln(os.Stderr, "skipping bad line:", err)
-		return
-	}
-	fmt.Printf("%s  %s  %-12s %s/%s/%s/%s  %s\n",
-		e.ID, e.At.Local().Format("15:04:05"), e.Kind,
-		e.Scope.Tenant, e.Scope.Agent, e.Scope.Project, e.Scope.User, e.Payload)
+func printEvent(e reverie.Event) {
+	// %q keeps control sequences stored in an event from running in the terminal.
+	fmt.Printf("%s  %s  %-12s %-14s %q  %q\n",
+		e.ID, e.At.Local().Format("15:04:05"), e.Kind, e.Origin, e.TaskID, string(e.Payload))
 }
