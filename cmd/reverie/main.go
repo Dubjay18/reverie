@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"reverie"
+	"github.com/Dubjay18/reverie"
 )
 
 const usage = `usage: reverie <command> [flags]
