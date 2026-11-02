@@ -1,0 +1,58 @@
+id: isolation
+category: isolation
+description: Two tenants and two users record sensitive facts under the same task ID; recall never leaks across scopes.
+sessions:
+  - task_id: shared-task-id
+    scope:
+      tenant: tenant-alpha
+      agent: agent-a
+      project: core
+      user: alice
+    at: "2026-04-10T10:00:00Z"
+    remember:
+      - entity: alice
+        relation: works_on
+        value: "AlphaVaultSecretProject"
+        source: user_stated
+    events:
+      - kind: message
+        origin: user_input
+        text: "Working on AlphaVaultSecretProject"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Alpha work done"
+  - task_id: shared-task-id
+    scope:
+      tenant: tenant-beta
+      agent: agent-a
+      project: core
+      user: bob
+    at: "2026-04-10T10:05:00Z"
+    remember:
+      - entity: bob
+        relation: works_on
+        value: "BetaPublicService"
+        source: user_stated
+    events:
+      - kind: message
+        origin: user_input
+        text: "Working on BetaPublicService"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Beta work done"
+queries:
+  - id: isolation-q1
+    scope:
+      tenant: tenant-beta
+      agent: agent-a
+      project: core
+      user: bob
+    at: "2026-04-10T11:00:00Z"
+    task: "What project is bob or alice working on? AlphaVaultSecretProject"
+    budget: 600
+    must_contain:
+      - "BetaPublicService"
+    must_not_contain:
+      - "AlphaVaultSecretProject"

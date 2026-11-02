@@ -1,0 +1,1 @@
+{"session_id":"abc123","transcript_path":"/home/u/.claude/projects/x/abc123.jsonl","cwd":"/home/u/work/billing-api","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"fix the ERR_42 timeout in the gateway"}

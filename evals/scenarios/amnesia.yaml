@@ -1,0 +1,41 @@
+id: amnesia
+category: amnesia
+description: Fail a deployment task in session 1; session 2 must surface the failure and fix before the task starts.
+sessions:
+  - task_id: sess-amnesia-1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: payments
+      user: jay
+    at: "2026-04-01T10:00:00Z"
+    events:
+      - kind: message
+        origin: user_input
+        text: "Deploy payments-service to production"
+      - kind: decision
+        origin: agent_decision
+        text: "Use rolling restart with PG_STATEMENT_TIMEOUT=5000ms before running migrations"
+      - kind: task.ended
+        origin: system
+        outcome: failure
+        summary: "Deploy failed with ERR_LOCK_901 when concurrent workers held table locks"
+    dream: true
+    dream_facts:
+      - entity: payments
+        relation: uses
+        value: "PG_STATEMENT_TIMEOUT=5000ms for rolling migrations"
+        confidence: 0.9
+queries:
+  - id: amnesia-q1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: payments
+      user: jay
+    at: "2026-04-02T10:00:00Z"
+    task: "Deploy payments-service to production"
+    budget: 800
+    must_contain:
+      - "PG_STATEMENT_TIMEOUT=5000ms"
+      - "sess-amnesia-1"

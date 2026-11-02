@@ -1,0 +1,62 @@
+id: contradiction
+category: contradiction
+description: User moves from Lagos to London; single-valued lives_in supersedes Lagos so only London is recalled in Facts.
+sessions:
+  - task_id: sess-contra-1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: profile
+      user: jay
+    at: "2026-01-10T09:00:00Z"
+    events:
+      - kind: message
+        origin: user_input
+        text: "Onboarding profile setup"
+      - kind: decision
+        origin: agent_decision
+        text: "Initial city recorded as Lagos"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Recorded initial location"
+    dream: true
+    dream_facts:
+      - entity: jay
+        relation: lives_in
+        value: "Lagos"
+        confidence: 0.85
+  - task_id: sess-contra-2
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: profile
+      user: jay
+    at: "2026-03-15T09:00:00Z"
+    remember:
+      - entity: jay
+        relation: lives_in
+        value: "London"
+        source: user_stated
+    events:
+      - kind: message
+        origin: user_input
+        text: "Profile city update"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Updated city"
+queries:
+  - id: contradiction-q1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: profile
+      user: jay
+    at: "2026-03-20T09:00:00Z"
+    task: "Where does jay live?"
+    budget: 600
+    must_contain:
+      - "London"
+    must_not_contain:
+      - "Lagos"

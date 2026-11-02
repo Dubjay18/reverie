@@ -1,0 +1,164 @@
+[
+  {
+    "id": "lme-single-session-1",
+    "benchmark": "LongMemEval",
+    "category": "single-session-user",
+    "sessions": [
+      {
+        "task_id": "lme-s1",
+        "at": "2026-01-05T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Our primary analytics warehouse is ClickHouse 24.8 running on us-east-1." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Noted ClickHouse 24.8 warehouse" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "analytics", "relation": "uses", "value": "ClickHouse 24.8 on us-east-1", "confidence": 0.9 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-01-12T10:00:00Z",
+      "task": "Which analytics warehouse version do we use?",
+      "budget": 600,
+      "must_contain": ["ClickHouse 24.8"]
+    }
+  },
+  {
+    "id": "lme-multi-session-1",
+    "benchmark": "LongMemEval",
+    "category": "multi-session",
+    "sessions": [
+      {
+        "task_id": "lme-ms-1",
+        "at": "2026-01-10T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Service billing-api depends_on stripe-webhook-gateway." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "billing-api depends on stripe-webhook-gateway" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "billing_api", "relation": "depends_on", "value": "stripe_webhook_gateway", "confidence": 0.9 }
+        ]
+      },
+      {
+        "task_id": "lme-ms-2",
+        "at": "2026-01-15T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "stripe_webhook_gateway uses HMAC-SHA256 signature verification." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "stripe_webhook_gateway uses HMAC-SHA256" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "stripe_webhook_gateway", "relation": "uses", "value": "HMAC-SHA256 signature verification", "confidence": 0.9 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-01-20T10:00:00Z",
+      "task": "What signature verification does billing_api depend on?",
+      "budget": 800,
+      "must_contain": ["HMAC-SHA256"]
+    }
+  },
+  {
+    "id": "lme-knowledge-update-1",
+    "benchmark": "LongMemEval",
+    "category": "knowledge-update",
+    "sessions": [
+      {
+        "task_id": "lme-ku-1",
+        "at": "2026-01-02T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Record initial city for jay." },
+          { "kind": "decision", "origin": "agent_decision", "text": "jay lives in Lagos." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Jay in Lagos" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "jay", "relation": "lives_in", "value": "Lagos", "confidence": 0.85 }
+        ]
+      },
+      {
+        "task_id": "lme-ku-2",
+        "at": "2026-02-02T10:00:00Z",
+        "remember": [
+          { "entity": "jay", "relation": "lives_in", "value": "Berlin", "source": "user_stated" }
+        ],
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Jay moved to Berlin." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Jay moved to Berlin" }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-02-10T10:00:00Z",
+      "task": "Where does jay live now?",
+      "budget": 600,
+      "must_contain": ["Berlin"],
+      "must_not_contain": ["Lagos"]
+    }
+  },
+  {
+    "id": "lme-temporal-reasoning-1",
+    "benchmark": "LongMemEval",
+    "category": "temporal-reasoning",
+    "sessions": [
+      {
+        "task_id": "lme-tr-1",
+        "at": "2026-03-10T14:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "We rotated the TLS root certificate yesterday." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Rotated TLS cert" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "tls_root", "relation": "note", "value": "Rotated certificate yesterday", "confidence": 0.88 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-03-15T14:00:00Z",
+      "task": "When was the tls_root certificate rotated?",
+      "budget": 600,
+      "must_contain": ["2026-03-09"]
+    }
+  },
+  {
+    "id": "lme-temporal-reasoning-2",
+    "benchmark": "LongMemEval",
+    "category": "temporal-reasoning",
+    "sessions": [
+      {
+        "task_id": "lme-tr-2a",
+        "at": "2026-01-05T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Outage Alpha started at 10:00 UTC." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Outage Alpha" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "outage_alpha", "relation": "note", "value": "occurred on 2026-01-05", "confidence": 0.85 }
+        ]
+      },
+      {
+        "task_id": "lme-tr-2b",
+        "at": "2026-01-19T10:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Outage Beta started at 10:00 UTC." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Outage Beta" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "outage_beta", "relation": "note", "value": "occurred on 2026-01-19", "confidence": 0.85 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-02-01T10:00:00Z",
+      "task": "How many exact days elapsed between outage_alpha and outage_beta?",
+      "budget": 600,
+      "must_contain": ["14 days"]
+    }
+  }
+]

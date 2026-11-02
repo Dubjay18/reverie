@@ -1,0 +1,24 @@
+# Default ontology. Replace it with your own schema.yaml (see engine.WithOntology).
+#
+# entities: the kinds of thing facts are about (optional; a relation may name
+#           the entity type it applies to).
+# relations: what can be said. cardinality is "one" (a new value replaces the
+#            old one) or "many" (values accumulate). ttl_days, when set, is how
+#            long a fact stays believed without being restated (0 = forever).
+entities:
+  person: {}
+  project: {}
+  tool: {}
+relations:
+  note:          { cardinality: many }
+  prefers:       { cardinality: many }
+  avoids:        { cardinality: many }
+  uses:          { cardinality: many }
+  works_on:      { cardinality: many }
+  decision:      { cardinality: many }
+  lesson:        { cardinality: many }
+  name:          { cardinality: one, subject: person }
+  role:          { cardinality: one, subject: person }
+  lives_in:      { cardinality: one, subject: person }
+  works_at:      { cardinality: one, subject: person }
+  status:        { cardinality: one, ttl_days: 90 }

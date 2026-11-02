@@ -1,0 +1,1 @@
+{"session_id":"abc123","cwd":"/home/u/work/billing-api","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/home/u/work/billing-api/gw.go","old_string":"a","new_string":"b"},"tool_response":{"filePath":"/home/u/work/billing-api/gw.go","type":"update"},"tool_use_id":"toolu_01","duration_ms":12}

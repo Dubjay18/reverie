@@ -1,0 +1,2 @@
+ALTER TABLE episodes ADD COLUMN goal       TEXT NOT NULL DEFAULT '';
+ALTER TABLE episodes ADD COLUMN last_error TEXT NOT NULL DEFAULT '';

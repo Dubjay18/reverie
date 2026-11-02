@@ -1,0 +1,64 @@
+id: staleness
+category: staleness
+description: Unpinned status fact expires after ontology TTL (90 days), while a pinned status fact remains active and recalled.
+sessions:
+  - task_id: sess-stale-1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ops
+      user: jay
+    at: "2026-01-01T12:00:00Z"
+    events:
+      - kind: message
+        origin: user_input
+        text: "Record operational status snapshot"
+      - kind: decision
+        origin: agent_decision
+        text: "Incident status is InvestigatingQueueBacklog; primary region status is PinnedEUWest1"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Recorded status snapshot"
+    dream: true
+    dream_facts:
+      - entity: incident
+        relation: status
+        value: "InvestigatingQueueBacklog"
+        confidence: 0.85
+      - entity: region
+        relation: status
+        value: "PinnedEUWest1"
+        confidence: 0.90
+    pin_values:
+      - "PinnedEUWest1"
+  - task_id: sess-stale-2
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ops
+      user: jay
+    at: "2026-04-20T12:00:00Z"
+    events:
+      - kind: message
+        origin: user_input
+        text: "Check current operational status"
+      - kind: task.ended
+        origin: system
+        outcome: success
+        summary: "Status check after 109 days"
+    dream: true
+queries:
+  - id: staleness-q1
+    scope:
+      tenant: eval
+      agent: agent-a
+      project: ops
+      user: jay
+    at: "2026-04-21T12:00:00Z"
+    task: "Check current status for incident and region"
+    budget: 600
+    must_contain:
+      - "PinnedEUWest1"
+    must_not_contain:
+      - "InvestigatingQueueBacklog"

@@ -1,0 +1,89 @@
+[
+  {
+    "id": "locomo-factual-1",
+    "benchmark": "LoCoMo",
+    "category": "single-hop-factual",
+    "sessions": [
+      {
+        "task_id": "loc-f1",
+        "at": "2026-02-01T09:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "Maya prefers Neovim with the kanagawa colorscheme." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Maya editor preference" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "maya", "relation": "prefers", "value": "Neovim with kanagawa colorscheme", "confidence": 0.9 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-02-05T09:00:00Z",
+      "task": "What editor does maya prefer?",
+      "budget": 600,
+      "must_contain": ["Neovim", "kanagawa"]
+    }
+  },
+  {
+    "id": "locomo-multihop-1",
+    "benchmark": "LoCoMo",
+    "category": "multi-hop-dialog",
+    "sessions": [
+      {
+        "task_id": "loc-mh-1",
+        "at": "2026-02-02T09:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "maya works_on checkout_v2." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "maya works on checkout_v2" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "maya", "relation": "works_on", "value": "checkout_v2", "confidence": 0.9 }
+        ]
+      },
+      {
+        "task_id": "loc-mh-2",
+        "at": "2026-02-03T09:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "checkout_v2 uses Temporal workflow engine." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "checkout_v2 uses Temporal" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "checkout_v2", "relation": "uses", "value": "Temporal workflow engine", "confidence": 0.9 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-02-10T09:00:00Z",
+      "task": "What workflow engine does maya's project use?",
+      "budget": 800,
+      "must_contain": ["Temporal"]
+    }
+  },
+  {
+    "id": "locomo-temporal-1",
+    "benchmark": "LoCoMo",
+    "category": "temporal-dialog",
+    "sessions": [
+      {
+        "task_id": "loc-td-1",
+        "at": "2026-03-01T12:00:00Z",
+        "events": [
+          { "kind": "message", "origin": "user_input", "text": "We shipped release v2.4.0 yesterday." },
+          { "kind": "task.ended", "origin": "system", "outcome": "success", "summary": "Shipped v2.4.0" }
+        ],
+        "dream": true,
+        "dream_facts": [
+          { "entity": "release_v2_4", "relation": "note", "value": "shipped yesterday", "confidence": 0.88 }
+        ]
+      }
+    ],
+    "query": {
+      "at": "2026-03-10T12:00:00Z",
+      "task": "What date did release_v2_4 ship?",
+      "budget": 600,
+      "must_contain": ["2026-02-28"]
+    }
+  }
+]
