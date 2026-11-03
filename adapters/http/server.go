@@ -157,6 +157,9 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 		if origin == "" {
 			origin = reverie.OriginAgent
 		}
+		if kind == reverie.Feedback && origin == reverie.OriginUser {
+			origin = reverie.OriginAgent
+		}
 		payload := it.Payload
 		if len(payload) == 0 {
 			b, _ := json.Marshal(map[string]string{"text": it.Text})
