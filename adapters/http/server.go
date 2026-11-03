@@ -157,6 +157,14 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 		if origin == "" {
 			origin = reverie.OriginAgent
 		}
+		// HTTP callers are agent clients, like /v1/remember: a feedback event
+		// claiming user_input would be stored as a user_stated fact (the engine
+		// trusts that origin because the hook sets it from the real prompt), so
+		// a client could plant facts the user never said. Record it as the
+		// agent's own.
+		if kind == reverie.Feedback && origin == reverie.OriginUser {
+			origin = reverie.OriginAgent
+		}
 		payload := it.Payload
 		if len(payload) == 0 {
 			b, _ := json.Marshal(map[string]string{"text": it.Text})
