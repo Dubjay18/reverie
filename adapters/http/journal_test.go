@@ -136,9 +136,6 @@ func TestHTTPSkillOutcome(t *testing.T) {
 	}
 }
 
-// An HTTP client must not be able to mint a user_stated fact by sending a
-// feedback event that claims user_input origin; /v1/remember and /v1/forget
-// already force agent trust, and /v1/record has to agree.
 func TestHTTPRecordCannotMintUserStatedFact(t *testing.T) {
 	srv, eng, sc := journalServer(t)
 	body := `{"events":[
@@ -163,7 +160,6 @@ func TestHTTPRecordCannotMintUserStatedFact(t *testing.T) {
 			t.Fatalf("HTTP client minted a user_stated fact: %+v", f)
 		}
 	}
-	// The event is still recorded, as the agent's, and ordinary user messages keep their origin.
 	evs, err := eng.Expand(context.Background(), sc, reverie.Ref{TaskID: "t1"})
 	if err != nil {
 		t.Fatal(err)
